@@ -1,17 +1,16 @@
 /**
- * Validiert eine XRechnung gegen die OFFIZIELLEN Schematron-Regeln — in purem
- * Node via SaxonJS (xslt3), ohne Java:
- *   1. EN-16931-UBL-Schematron (ConnectingEurope)
- *   2. XRechnung-CIUS (BR-DE) aus der offiziellen KoSIT-Konfiguration
+ * Validiert eine E-Rechnung gegen die OFFIZIELLEN Schematron-Regeln — in purem
+ * Node via SaxonJS (xslt3), ohne Java. Erkennt automatisch UBL (XRechnung) oder
+ * CII (ZUGFeRD/Factur-X) und wählt die passenden Schematrons:
+ *   - UBL: EN-16931-UBL (ConnectingEurope) + XRechnung-CIUS (KoSIT-Konfig)
+ *   - CII: EN-16931-CII (KoSIT-Konfig)
  *
- * Das ist im Kern dieselbe Schematron-Prüfung wie der KoSIT-Validator (nur die
- * vorgelagerte XSD-Prüfung fehlt). Aufruf:
- *   npm run validate:erechnung                # erzeugt ein Sample und prüft es
+ * Aufruf:
+ *   npm run validate:erechnung                # Sample (XRechnung-UBL) erzeugen + prüfen
  *   npm run validate:erechnung -- pfad/zur.xml
  *
- * Exit 0 = bestanden, 1 = Verletzung(en). Artefakte landen in validation/.cache
- * (gitignored). Für die XRechnung-CIUS-Ebene wird `unzip` benötigt; fehlt es,
- * wird diese Ebene mit Hinweis übersprungen (EN-16931 läuft trotzdem).
+ * Exit 0 = bestanden, 1 = Verletzung(en). Schematrons landen in validation/.cache
+ * (gitignored). Für KoSIT-Schematrons (XRechnung-CIUS, CII) wird `unzip` benötigt.
  */
 import { execSync } from "node:child_process";
 import { mkdirSync, existsSync, writeFileSync, readFileSync } from "node:fs";
@@ -21,36 +20,47 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CACHE = path.join(ROOT, "validation", ".cache");
 
-const EN16931_XSLT = path.join(CACHE, "EN16931-UBL-validation.xslt");
-const EN16931_URL =
+const EN16931_UBL_XSLT = path.join(CACHE, "EN16931-UBL-validation.xslt");
+const EN16931_UBL_URL =
   "https://raw.githubusercontent.com/ConnectingEurope/eInvoicing-EN16931/validation-1.3.13/ubl/xslt/EN16931-UBL-validation.xslt";
 
 const KOSIT_DIR = path.join(CACHE, "kosit");
 const KOSIT_ZIP = path.join(CACHE, "kosit-config.zip");
 const KOSIT_URL =
   "https://github.com/itplr-kosit/validator-configuration-xrechnung/releases/download/release-2024-06-20/validator-configuration-xrechnung_3.0.2_2024-06-20.zip";
-const XRECHNUNG_XSLT = path.join(KOSIT_DIR, "resources", "xrechnung", "3.0.2", "xsl", "XRechnung-UBL-validation.xsl");
+const XRECHNUNG_UBL_XSLT = path.join(KOSIT_DIR, "resources", "xrechnung", "3.0.2", "xsl", "XRechnung-UBL-validation.xsl");
+const EN16931_CII_XSLT = path.join(KOSIT_DIR, "resources", "cii", "16b", "xsl", "EN16931-CII-validation.xsl");
 
 async function download(url: string, dest: string): Promise<void> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Download fehlgeschlagen (HTTP ${res.status}): ${url}`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  writeFileSync(dest, buf);
+  writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
 }
 
-function runSchematron(xsltPath: string, xmlPath: string, label: string): { errors: string[]; warnings: number } {
+async function ensureKosit(): Promise<boolean> {
+  if (existsSync(EN16931_CII_XSLT)) return true;
+  try {
+    if (!existsSync(KOSIT_ZIP)) await download(KOSIT_URL, KOSIT_ZIP);
+    mkdirSync(KOSIT_DIR, { recursive: true });
+    execSync(`unzip -oq "${KOSIT_ZIP}" -d "${KOSIT_DIR}"`, { stdio: "pipe" });
+    return existsSync(EN16931_CII_XSLT);
+  } catch {
+    return false;
+  }
+}
+
+function runSchematron(xsltPath: string, xmlPath: string, label: string): string[] {
   const svrl = path.join(CACHE, "report.svrl.xml");
   execSync(`npx xslt3 -xsl:"${xsltPath}" -s:"${xmlPath}" -o:"${svrl}"`, { cwd: ROOT, stdio: "pipe" });
   const report = readFileSync(svrl, "utf8");
   const errors: string[] = [];
-  let warnings = 0;
   for (const block of report.split("<svrl:failed-assert").slice(1)) {
     const flag = block.match(/flag="([^"]*)"/)?.[1] ?? "fatal";
+    if (flag === "warning") continue;
     const text = (block.match(/<svrl:text>([\s\S]*?)<\/svrl:text>/)?.[1] ?? "").replace(/\s+/g, " ").trim();
-    if (flag === "warning") warnings++;
-    else errors.push(`[${label}/${flag}] ${text.slice(0, 160)}`);
+    errors.push(`[${label}/${flag}] ${text.slice(0, 160)}`);
   }
-  return { errors, warnings };
+  return errors;
 }
 
 async function main(): Promise<void> {
@@ -62,38 +72,36 @@ async function main(): Promise<void> {
     execSync(`npx tsx scripts/generate-sample-xrechnung.ts "${target}"`, { cwd: ROOT, stdio: "inherit" });
   }
 
-  const allErrors: string[] = [];
-  let totalWarnings = 0;
+  const xml = readFileSync(target, "utf8");
+  const isCII = xml.includes("CrossIndustryInvoice");
+  const errors: string[] = [];
+  const layers: string[] = [];
 
-  // 1) EN-16931
-  if (!existsSync(EN16931_XSLT)) await download(EN16931_URL, EN16931_XSLT);
-  const en = runSchematron(EN16931_XSLT, target, "EN16931");
-  allErrors.push(...en.errors);
-  totalWarnings += en.warnings;
-
-  // 2) XRechnung-CIUS (BR-DE) — benötigt unzip
-  let xrechnungRan = false;
-  try {
-    if (!existsSync(XRECHNUNG_XSLT)) {
-      if (!existsSync(KOSIT_ZIP)) await download(KOSIT_URL, KOSIT_ZIP);
-      mkdirSync(KOSIT_DIR, { recursive: true });
-      execSync(`unzip -oq "${KOSIT_ZIP}" -d "${KOSIT_DIR}"`, { stdio: "pipe" });
+  if (isCII) {
+    if (await ensureKosit()) {
+      errors.push(...runSchematron(EN16931_CII_XSLT, target, "EN16931-CII"));
+      layers.push("EN-16931-CII");
+    } else {
+      console.error("[validate] EN-16931-CII übersprungen — 'unzip' für die KoSIT-Konfiguration nötig.");
     }
-    const xr = runSchematron(XRECHNUNG_XSLT, target, "XRechnung");
-    allErrors.push(...xr.errors);
-    totalWarnings += xr.warnings;
-    xrechnungRan = true;
-  } catch (e) {
-    console.error(`[validate] XRechnung-CIUS-Ebene übersprungen (${(e as Error).message.split("\n")[0]}). 'unzip' nötig.`);
+  } else {
+    if (!existsSync(EN16931_UBL_XSLT)) await download(EN16931_UBL_URL, EN16931_UBL_XSLT);
+    errors.push(...runSchematron(EN16931_UBL_XSLT, target, "EN16931-UBL"));
+    layers.push("EN-16931-UBL");
+    if (await ensureKosit()) {
+      errors.push(...runSchematron(XRECHNUNG_UBL_XSLT, target, "XRechnung"));
+      layers.push("XRechnung-CIUS");
+    } else {
+      console.error("[validate] XRechnung-CIUS übersprungen — 'unzip' nötig.");
+    }
   }
 
-  const layers = `EN-16931${xrechnungRan ? " + XRechnung-CIUS" : ""}`;
-  if (allErrors.length === 0) {
-    console.log(`✅ Schematron BESTANDEN (${layers}) — ${path.basename(target)} (${totalWarnings} Warnung(en))`);
+  if (errors.length === 0) {
+    console.log(`✅ Schematron BESTANDEN (${layers.join(" + ") || "—"}) — ${path.basename(target)}`);
     process.exit(0);
   }
-  console.error(`❌ Schematron: ${allErrors.length} Verletzung(en) in ${path.basename(target)}:`);
-  for (const e of allErrors) console.error(`   - ${e}`);
+  console.error(`❌ Schematron: ${errors.length} Verletzung(en) in ${path.basename(target)}:`);
+  for (const e of errors) console.error(`   - ${e}`);
   process.exit(1);
 }
 

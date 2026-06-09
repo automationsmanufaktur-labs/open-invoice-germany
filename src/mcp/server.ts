@@ -27,6 +27,7 @@ import { finalizeInvoice, FinalizeError } from "@/domain/invoice/finalize";
 import { cancelInvoice, CancelError } from "@/domain/invoice/cancel";
 import { loadEInvoiceData } from "@/lib/einvoice/load";
 import { buildXRechnungUBL } from "@/lib/einvoice/xrechnung";
+import { renderZugferdPdf } from "@/lib/einvoice/zugferd";
 import { validateXRechnung } from "@/lib/einvoice/en16931-core";
 import { renderInvoicePdf } from "@/lib/pdf/invoice-pdf";
 import { organizationSchema, customerSchema, createInvoiceSchema, TaxScheme } from "@/schemas";
@@ -499,10 +500,10 @@ server.registerTool(
   {
     title: "Rechnung exportieren (PDF + XRechnung)",
     description:
-      "Schreibt die Rechnung als PDF und/oder XRechnung-XML in eine Datei und gibt die Pfade + EN-16931-Validierungsreport zurück. Nur für festgeschriebene Rechnungen (XRechnung).",
+      "Schreibt die Rechnung als PDF, XRechnung-XML und/oder ZUGFeRD (Hybrid-PDF mit eingebettetem CII-XML) in eine Datei und gibt die Pfade + EN-16931-Validierungsreport zurück. XRechnung/ZUGFeRD nur für festgeschriebene Rechnungen.",
     inputSchema: {
       invoice: z.string().describe("Rechnungs-ID oder -Nummer"),
-      format: z.enum(["both", "pdf", "xrechnung"]).default("both"),
+      format: z.enum(["both", "pdf", "xrechnung", "zugferd"]).default("both"),
       outputDir: z.string().optional().describe("Zielverzeichnis (Default: <Projekt>/exports)"),
     },
   },
@@ -536,6 +537,13 @@ server.registerTool(
           writeFileSync(xmlPath, xml, "utf8");
           written.push(xmlPath);
         }
+      }
+      if (format === "zugferd") {
+        if (inv.status === "DRAFT") return fail("ZUGFeRD nur für festgeschriebene Rechnungen. Zuerst finalize_invoice.");
+        const zpdf = await renderZugferdPdf(data);
+        const zpath = path.join(dir, `${base}-zugferd.pdf`);
+        writeFileSync(zpath, zpdf);
+        written.push(zpath);
       }
       return ok(
         `Export geschrieben:\n${written.join("\n")}` +

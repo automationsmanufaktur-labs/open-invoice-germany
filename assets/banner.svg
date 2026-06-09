@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 420" role="img" aria-label="OpenInvoice Germany — free self-hostable invoicing with XRechnung / EN 16931, GoBD and § 14 UStG">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B0E14"/>
+      <stop offset="1" stop-color="#0C1020"/>
+    </linearGradient>
+    <radialGradient id="glowL" cx="0.16" cy="0.18" r="0.5">
+      <stop offset="0" stop-color="#6366F1" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#6366F1" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowR" cx="0.9" cy="0.95" r="0.55">
+      <stop offset="0" stop-color="#3FB950" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#3FB950" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#818CF8"/>
+      <stop offset="1" stop-color="#3FB950"/>
+    </linearGradient>
+    <style>
+      .sans { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="420" fill="url(#bg)"/>
+  <rect width="1280" height="420" fill="url(#glowL)"/>
+  <rect width="1280" height="420" fill="url(#glowR)"/>
+  <rect x="0.5" y="0.5" width="1279" height="419" fill="none" stroke="#222838" stroke-width="1"/>
+
+  <!-- left: wordmark + tagline -->
+  <text x="72" y="92" class="mono" font-size="15" letter-spacing="5" fill="#818CF8">OPEN-SOURCE&#160;&#160;·&#160;&#160;SELF-HOSTED</text>
+
+  <text x="70" y="172" class="sans" font-size="60" font-weight="800" letter-spacing="-1.5">
+    <tspan fill="#E6EDF3">OpenInvoice</tspan>
+    <tspan fill="#818CF8">&#160;Germany</tspan>
+  </text>
+
+  <text x="72" y="222" class="sans" font-size="26" fill="#ADBAC7">
+    <tspan fill="#A5B4FC" font-weight="700">Invoice</tspan>
+    <tspan fill="#6E7681">&#160;&#160;→&#160;&#160;</tspan>
+    <tspan fill="#3FB950" font-weight="700">XRechnung · EN 16931</tspan>
+  </text>
+  <text x="72" y="254" class="sans" font-size="20" fill="#8B98A5">GoBD · § 14 UStG · Kleinunternehmer § 19 · free forever</text>
+
+  <!-- pills -->
+  <g class="mono" font-size="15">
+    <g>
+      <rect x="72" y="282" width="112" height="34" rx="17" fill="#10131F" stroke="#2A3142"/>
+      <text x="128" y="304" text-anchor="middle" fill="#C9D1D9">AGPL-3.0</text>
+    </g>
+    <g>
+      <rect x="196" y="282" width="108" height="34" rx="17" fill="#10131F" stroke="#2A3142"/>
+      <text x="250" y="304" text-anchor="middle" fill="#C9D1D9">Next.js 16</text>
+    </g>
+    <g>
+      <rect x="316" y="282" width="112" height="34" rx="17" fill="#10131F" stroke="#2A3142"/>
+      <text x="372" y="304" text-anchor="middle" fill="#C9D1D9">MCP-ready</text>
+    </g>
+    <g>
+      <rect x="440" y="282" width="120" height="34" rx="17" fill="#10131F" stroke="#2A3142"/>
+      <text x="500" y="304" text-anchor="middle" fill="#C9D1D9">XRechnung</text>
+    </g>
+  </g>
+
+  <text x="72" y="360" class="sans" font-size="15" fill="#6E7681">Voice-controlled via Claude Code (MCP) · your data stays local · not tax advice</text>
+
+  <!-- right: invoice doc -> XML doc with green check -->
+  <g transform="translate(842,112)">
+    <!-- source invoice doc -->
+    <g transform="translate(0,40)">
+      <rect x="0" y="0" width="150" height="190" rx="14" fill="#10131F" stroke="#3A3F66"/>
+      <rect x="0" y="0" width="150" height="46" rx="14" fill="#191B33"/>
+      <rect x="0" y="30" width="150" height="16" fill="#191B33"/>
+      <text x="20" y="31" class="mono" font-size="14" fill="#A5B4FC">RECHNUNG</text>
+      <g stroke="#2A3142" stroke-width="6" stroke-linecap="round">
+        <line x1="20" y1="76" x2="130" y2="76"/>
+        <line x1="20" y1="100" x2="130" y2="100"/>
+        <line x1="20" y1="124" x2="108" y2="124"/>
+      </g>
+      <!-- total line -->
+      <line x1="20" y1="150" x2="130" y2="150" stroke="#39405A" stroke-width="2"/>
+      <text x="130" y="178" text-anchor="end" class="mono" font-size="15" fill="#A5B4FC">€ 1.234,00</text>
+    </g>
+
+    <!-- arrow -->
+    <g transform="translate(170,135)">
+      <line x1="0" y1="0" x2="78" y2="0" stroke="url(#arrow)" stroke-width="6" stroke-linecap="round"/>
+      <path d="M76 -10 L96 0 L76 10 Z" fill="#3FB950"/>
+    </g>
+
+    <!-- target XRechnung XML doc -->
+    <g transform="translate(268,40)">
+      <rect x="0" y="0" width="150" height="190" rx="14" fill="#10131F" stroke="#2E5B39"/>
+      <rect x="0" y="0" width="150" height="46" rx="14" fill="#13251A"/>
+      <rect x="0" y="30" width="150" height="16" fill="#13251A"/>
+      <text x="20" y="31" class="mono" font-size="13" fill="#3FB950">XRechnung</text>
+      <g class="mono" font-size="12" fill="#3C8F4E">
+        <text x="20" y="80">&lt;Invoice&gt;</text>
+        <text x="34" y="100">&lt;ID&gt;…&lt;/ID&gt;</text>
+        <text x="34" y="120">&lt;TaxTotal/&gt;</text>
+        <text x="34" y="140">&lt;Total/&gt;</text>
+        <text x="20" y="160">&lt;/Invoice&gt;</text>
+      </g>
+      <!-- green check badge -->
+      <circle cx="150" cy="0" r="22" fill="#0B0E14" stroke="#3FB950" stroke-width="2"/>
+      <path d="M140 0 l7 7 l13 -15" fill="none" stroke="#3FB950" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>

@@ -1,101 +1,104 @@
 <div align="center">
 
+<img src="https://raw.githubusercontent.com/automationsmanufaktur-labs/open-invoice-germany/main/assets/banner.svg" alt="OpenInvoice Germany — free self-hostable invoicing with XRechnung / EN 16931, GoBD and § 14 UStG" width="100%" />
+
 # OpenInvoice Germany
 
-**Kostenlose, self-hostbare Open-Source-Rechnungssoftware für Deutschland.**
-E-Rechnung (XRechnung / ZUGFeRD) · GoBD · § 14 UStG · Kleinunternehmer § 19 · DSGVO
+**Free, self-hostable open-source invoicing software for Germany.**
+E-invoice (XRechnung / ZUGFeRD) · GoBD · § 14 UStG · small business § 19 · GDPR
 
 [![CI](https://github.com/automationsmanufaktur-labs/open-invoice-germany/actions/workflows/ci.yml/badge.svg)](https://github.com/automationsmanufaktur-labs/open-invoice-germany/actions/workflows/ci.yml)
-&nbsp;·&nbsp; Lizenz: **AGPL-3.0** &nbsp;·&nbsp; [English](README.en.md)
+&nbsp;·&nbsp; Licence: **AGPL-3.0** &nbsp;·&nbsp; **English** · [Deutsch](README.de.md)
 
 </div>
 
-> **Warum?** Ab 2025 gilt die E-Rechnungs-Empfangspflicht im B2B, ab 2027/2028 die Versandpflicht. Viele Selbstständige und KMU zahlen monatlich für Rechnungssoftware, nur um rechtskonform zu bleiben. Dieses Projekt macht das **kostenlos und frei** — du hostest es selbst, deine Daten bleiben bei dir.
+> **Why?** From 2025 German B2B must be able to *receive* structured e-invoices; from 2027/2028 *sending* becomes mandatory. Many freelancers and SMEs pay a monthly fee just to stay compliant. This project makes it **free and open** — you host it yourself, your data stays with you.
 
-> ⚠️ **Keine Steuer- oder Rechtsberatung.** GoBD-Konformität erfordert zusätzlich eine Verfahrensdokumentation des Anwenders. Alle rechtlichen Grundlagen mit Quellen stehen in **[COMPLIANCE.md](COMPLIANCE.md)** (Single Source of Truth). Ohne Gewähr.
+> ⚠️ **Not tax or legal advice.** GoBD compliance additionally requires the user's own process documentation (Verfahrensdokumentation). All legal references with sources live in **[COMPLIANCE.md](COMPLIANCE.md)** (single source of truth). No warranty.
 
 ---
 
-## 🗣️ Mit Claude Code per Sprache (MCP)
+## 🗣️ Talk to it with Claude Code (MCP)
 
-Verbinde deine lokale Instanz mit **Claude Code** oder Claude Desktop und erstelle rechtssichere Rechnungen, indem du sie einfach beschreibst:
+Connect your local instance to **Claude Code** or Claude Desktop and create legally sound invoices just by describing them:
 
-> „Erstelle eine Rechnung an Müller GmbH über 3 Stunden Beratung à 95 €, Leistung heute, schreib sie fest und exportier die XRechnung."
+> "Create an invoice to Müller GmbH for 3 hours of consulting at €95, delivered today, finalise it and export the XRechnung."
 
-Claude ruft die passenden Tools auf (Kunde/Leistung anlegen → Rechnung → festschreiben → PDF + XRechnung). Das Festschreiben **erzwingt** die § 14-Pflichtangaben — nicht-konforme Rechnungen sind ausgeschlossen, alles bleibt lokal. Setup + Beispiele: **[docs/MCP.md](docs/MCP.md)**.
+Claude calls the right tools in order (create customer/service → invoice → finalise → PDF + XRechnung). Finalising **enforces** the § 14 UStG mandatory fields — non-compliant invoices are rejected, and everything stays local. Setup + examples: **[docs/MCP.md](docs/MCP.md)**.
 
 ```bash
-npm run mcp   # MCP-Server (stdio) starten / in Claude Code via .mcp.json einbinden
+npm run mcp   # start the MCP server (stdio) / wire it into Claude Code via .mcp.json
 ```
 
-## Funktionen
+## Features
 
-- **Sprachsteuerung via MCP** (Claude Code/Desktop) — siehe oben.
-- **GoBD-Kern**: Festschreibung (Entwurf → unveränderbar), lückenlose Nummernkreise, append-only Audit-**Hash-Chain**, Storno statt Löschung.
-- **§ 14 UStG**: Pflichtangaben-Prüfung blockt das Festschreiben bei fehlenden Angaben.
-- **Steuerschemata**: Regelbesteuerung (19/7/0), Kleinunternehmer (§ 19), Reverse Charge (§ 13b), ig. Lieferung, Differenzbesteuerung (§ 25a), Kleinbetrag (§ 33).
-- **E-Rechnung**: **XRechnung** (UBL, EN 16931) — Export inkl. EN-16931-Kernregel-Validierung. ZUGFeRD/Factur-X über Mustang-Sidecar (Docker).
-- **PDF-Export** ("sonstige Rechnung") mit allen Pflichtangaben.
-- **Self-hosted**: SQLite-Solo ohne Server **oder** PostgreSQL via Docker.
-- **Anmeldung**: eingebautes Admin-Konto (scrypt-Hash + signiertes Session-Cookie) — App und API geschützt.
+- **Voice control via MCP** (Claude Code/Desktop) — see above.
+- **GoBD core**: finalisation (draft → immutable), gapless number ranges, append-only audit **hash-chain**, cancellation instead of deletion.
+- **§ 14 UStG**: mandatory-field check blocks finalisation when data is missing.
+- **Tax schemes**: standard rating (19/7/0), small business (§ 19), reverse charge (§ 13b), intra-EU supply, margin scheme (§ 25a), small amount (§ 33).
+- **E-invoice**: **XRechnung** (UBL, EN 16931) export incl. EN-16931 core-rule validation. ZUGFeRD/Factur-X via the Mustang sidecar (Docker).
+- **PDF export** ("other invoice") with all mandatory fields.
+- **Self-hosted**: SQLite solo without a server **or** PostgreSQL via Docker.
+- **Sign-in**: built-in admin account (scrypt hash + signed session cookie) — app and API protected.
 
 ### Status
 
-MVP. Was funktioniert: Stammdaten/Kunden/Produkte, Angebots-/Rechnungsmodell, Entwurf→Festschreiben→Storno, PDF- + XRechnung-Export, GoBD-Nummernkreis + Audit. Auf der Roadmap: Mahnwesen-UI, wiederkehrende Rechnungen, ZUGFeRD-Hybrid, DATEV-Export, B2G/Leitweg-ID, OSS/ZM, Multi-User. Siehe [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) (MVP / Stufe 2 / Stufe 3) und die ehrliche Liste der **[bekannten Einschränkungen](docs/LIMITATIONEN.md)**.
+MVP. What works: master data/customers/products, quote & invoice model, draft → finalise → cancel, PDF + XRechnung export, GoBD number range + audit. On the roadmap: dunning UI, recurring invoices, ZUGFeRD hybrid, DATEV export, B2G/Leitweg-ID, OSS/ZM, multi-user. See [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) (MVP / stage 2 / stage 3) and the honest list of **[known limitations](docs/LIMITATIONEN.md)**.
 
-## Tech-Stack
+## Tech stack
 
 Next.js 16 (App Router) · TypeScript (strict) · Prisma 6 · SQLite/PostgreSQL · TailwindCSS · Zod · Vitest.
-Geldbeträge als Integer-Cent, Mengen als Integer-Milliunits, Steuer pro EN-16931-Gruppe — siehe [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md).
+Money as integer cents, quantities as integer milli-units, tax per EN-16931 group — see [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md).
 
-## Schnellstart (Solo / SQLite — kein Server nötig)
+## Quick start (solo / SQLite — no server needed)
 
 ```bash
 git clone https://github.com/automationsmanufaktur-labs/open-invoice-germany.git
 cd open-invoice-germany
 npm install
-cp .env.example .env            # DATABASE_URL="file:./dev.db" ist Default
-npm run db:migrate              # Schema anlegen
-npm run db:seed                 # optionale Demo-Daten
+cp .env.example .env            # DATABASE_URL="file:./dev.db" is the default
+npm run db:migrate              # create the schema
+npm run db:seed                 # optional demo data
 npm run dev                     # http://localhost:3000
 ```
 
-Die SQLite-Datei liegt unter `prisma/dev.db` und gehört nur dir. Beim ersten Start legst du unter **`/setup`** dein Admin-Konto an (nach `npm run db:seed` gibt es einen Demo-Login `admin@example.com` / `demo1234` — bitte ändern). Für **Produktion**: `AUTH_SECRET` in `.env` setzen (`openssl rand -base64 32`) und hinter HTTPS betreiben.
+The SQLite file lives at `prisma/dev.db` and belongs to you alone. On first start you create your admin account under **`/setup`** (after `npm run db:seed` there is a demo login `admin@example.com` / `demo1234` — please change it). For **production**: set `AUTH_SECRET` in `.env` (`openssl rand -base64 32`) and run behind HTTPS.
 
-**In der App:** `Einstellungen` (Unternehmen anlegen) → `Kunden` → `Neue Rechnung` → Position erfassen → **Festschreiben** (vergibt die Nummer, macht GoBD-konform unveränderbar) → **PDF**- und **XRechnung**-Export. Komplette Schritt-für-Schritt-Anleitung: **[docs/ANLEITUNG.md](docs/ANLEITUNG.md)**.
+**In the app:** `Settings` (create company) → `Customers` → `New invoice` → add line items → **Finalise** (assigns the number, makes it GoBD-immutable) → **PDF** and **XRechnung** export. Full step-by-step guide: **[docs/ANLEITUNG.md](docs/ANLEITUNG.md)** (German).
 
-## Mit Docker (PostgreSQL + ZUGFeRD-Sidecar)
+## With Docker (PostgreSQL + ZUGFeRD sidecar)
 
 ```bash
-cp .env.example .env            # DATABASE_URL auf die postgresql://-Zeile umstellen
+cp .env.example .env            # switch DATABASE_URL to the postgresql:// line
 docker compose up --build
 ```
 
-`docker-compose.yml` startet App + PostgreSQL + den **Mustang**-Sidecar (XRechnung-/ZUGFeRD-Erzeugung & -Validierung). Das Postgres-Schema liegt in `prisma/schema.postgres.prisma` (modellidentisch, nur andere Datasource).
+`docker-compose.yml` starts the app + PostgreSQL + the **Mustang** sidecar (XRechnung/ZUGFeRD generation & validation). The Postgres schema lives in `prisma/schema.postgres.prisma` (model-identical, only a different datasource).
 
 ## Tests
 
 ```bash
-npm test          # Vitest: Money, Steuer, Nummernkreis, GoBD-Unveränderbarkeit, Hash-Chain, EN-16931
+npm test          # Vitest: money, tax, number ranges, GoBD immutability, hash-chain, EN 16931
 ```
 
-Die Integrationstests beweisen u. a. **lückenlose, unveränderbare Nummernkreise** und dass festgeschriebene Rechnungen nicht editierbar sind.
+The integration tests prove, among other things, **gapless, immutable number ranges** and that finalised invoices cannot be edited.
 
-## E-Rechnung-Validierung
+## E-invoice validation
 
 ```bash
-npm run validate:erechnung      # offizielle Schematron-Regeln, ohne Java
+npm run validate:erechnung      # official Schematron rules, no Java
 ```
-Prüft die erzeugte XRechnung gegen die **offiziellen Schematron-Regeln** in purem Node via SaxonJS:
-- **EN-16931-UBL-Schematron** (ConnectingEurope) und
-- **XRechnung-CIUS / BR-DE** (offizielle KoSIT-Konfiguration 3.0.2; benötigt `unzip`).
 
-Das ist im Kern dieselbe Schematron-Prüfung wie der **[KoSIT-Validator](https://github.com/itplr-kosit/validator)** — und läuft als **harter Gate in der CI**. Der KoSIT-Validator (Java) läuft dort zusätzlich als unabhängiger Cross-Check (deckt auch die vorgelagerte XSD-Prüfung ab). Schnelle Kernregeln sind Teil von `npm test`.
+Validates the generated XRechnung against the **official Schematron rules** in pure Node via SaxonJS:
+- **EN-16931 UBL Schematron** (ConnectingEurope) and
+- **XRechnung CIUS / BR-DE** (official KoSIT config 3.0.2; requires `unzip`).
 
-## Mitmachen
+This is essentially the same Schematron check as the **[KoSIT validator](https://github.com/itplr-kosit/validator)** — and runs as a **hard gate in CI**. The KoSIT validator (Java) additionally runs there as an independent cross-check (also covering the upstream XSD check). Fast core rules are part of `npm test`.
 
-Beiträge willkommen — siehe [CONTRIBUTING.md](CONTRIBUTING.md). Rechtliche Korrekturen bitte mit Quelle (Norm/BMF-Schreiben) gegen [COMPLIANCE.md](COMPLIANCE.md).
+## Contributing
 
-## Lizenz
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Please file legal corrections with a source (statute/BMF letter) against [COMPLIANCE.md](COMPLIANCE.md).
 
-**[AGPL-3.0](LICENSE).** Du darfst die Software nutzen, ändern und selbst hosten. Wer sie als Netzwerk-Dienst betreibt, muss den (modifizierten) Quellcode den Nutzern verfügbar machen — so bleibt das Projekt für alle frei. Begründung der Lizenzwahl: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md#3-lizenz-empfehlung).
+## License
+
+**[AGPL-3.0](LICENSE).** You may use, modify and self-host the software. Anyone who runs it as a network service must make the (modified) source available to its users — keeping the project free for everyone. Rationale for the licence choice: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md#3-lizenz-empfehlung).

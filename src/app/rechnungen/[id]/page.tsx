@@ -66,6 +66,15 @@ export default async function InvoiceDetail({
               XRechnung (XML)
             </a>
           )}
+          {!isDraft && (
+            <a
+              href={`/api/invoices/${invoice.id}/zugferd`}
+              target="_blank"
+              className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            >
+              ZUGFeRD (PDF)
+            </a>
+          )}
           {isDraft && (
             <form action={finalizeAction}>
               <input type="hidden" name="id" value={invoice.id} />
