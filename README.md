@@ -16,8 +16,21 @@ E-Rechnung (XRechnung / ZUGFeRD) · GoBD · § 14 UStG · Kleinunternehmer § 19
 
 ---
 
+## 🗣️ Mit Claude Code per Sprache (MCP)
+
+Verbinde deine lokale Instanz mit **Claude Code** oder Claude Desktop und erstelle rechtssichere Rechnungen, indem du sie einfach beschreibst:
+
+> „Erstelle eine Rechnung an Müller GmbH über 3 Stunden Beratung à 95 €, Leistung heute, schreib sie fest und exportier die XRechnung."
+
+Claude ruft die passenden Tools auf (Kunde/Leistung anlegen → Rechnung → festschreiben → PDF + XRechnung). Das Festschreiben **erzwingt** die § 14-Pflichtangaben — nicht-konforme Rechnungen sind ausgeschlossen, alles bleibt lokal. Setup + Beispiele: **[docs/MCP.md](docs/MCP.md)**.
+
+```bash
+npm run mcp   # MCP-Server (stdio) starten / in Claude Code via .mcp.json einbinden
+```
+
 ## Funktionen
 
+- **Sprachsteuerung via MCP** (Claude Code/Desktop) — siehe oben.
 - **GoBD-Kern**: Festschreibung (Entwurf → unveränderbar), lückenlose Nummernkreise, append-only Audit-**Hash-Chain**, Storno statt Löschung.
 - **§ 14 UStG**: Pflichtangaben-Prüfung blockt das Festschreiben bei fehlenden Angaben.
 - **Steuerschemata**: Regelbesteuerung (19/7/0), Kleinunternehmer (§ 19), Reverse Charge (§ 13b), ig. Lieferung, Differenzbesteuerung (§ 25a), Kleinbetrag (§ 33).

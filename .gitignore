@@ -46,3 +46,6 @@ next-env.d.ts
 *.db
 *.db-journal
 /prisma/*.db
+
+# MCP-/Rechnungs-Export-Ausgaben
+/exports
