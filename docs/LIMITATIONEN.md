@@ -8,7 +8,7 @@ Damit niemand böse Überraschungen erlebt: Das hier ist (noch) **nicht** abgede
 
 ## E-Rechnung
 - **Nur XRechnung-XML + PDF.** ZUGFeRD/Factur-X (PDF/A-3 mit eingebettetem XML) ist über den optionalen Mustang-Sidecar vorgesehen, aber noch nicht verdrahtet.
-- **Validierung:** Lokal werden die EN-16931-**Kernregeln** geprüft (Pflichtfelder + Rechenregeln). Die **vollständige, autoritative** Prüfung (XSD + Schematron) macht der offizielle **KoSIT-Validator im CI** — lokal „valide" bedeutet nicht automatisch „KoSIT-bestanden".
+- **Validierung:** Das **offizielle EN-16931-UBL-Schematron** läuft lokal & in CI via SaxonJS (`npm run validate:erechnung`, ohne Java) — die erzeugte XRechnung besteht es. Die **XRechnung-CIUS-Sonderregeln (BR-DE)** prüft zusätzlich der **KoSIT-Validator (Java) in der CI**. Der schnelle JS-Kerncheck im Code ersetzt diese nicht.
 - **Storno/Gutschrift als E-Rechnung:** wird als korrektes UBL-`CreditNote`-Dokument (Typ 381, positive Beträge) mit `BillingReference` (BG-3, Bezug zur Originalrechnung, § 31 Abs. 5 UStDV) erzeugt. ✓
 - **EndpointID** wird als E-Mail (`EM`) ausgegeben. Leitweg-/Peppol-Schemacodes (EAS) werden noch nicht differenziert.
 - **PaymentMeans** wird nur bei hinterlegter IBAN ausgegeben.

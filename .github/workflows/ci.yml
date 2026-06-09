@@ -22,8 +22,13 @@ jobs:
       - run: npm run build
         env:
           DATABASE_URL: "file:./dev.db"
+      - name: EN-16931-Schematron-Validierung (offiziell, via SaxonJS, ohne Java)
+        run: npm run validate:erechnung
 
-  # Autoritative E-Rechnung-Prüfung mit dem offiziellen KoSIT-Validator (Java).
+  # Zusätzliche XRechnung-CIUS-Prüfung mit dem offiziellen KoSIT-Validator (Java).
+  # Die EN-16931-Kernprüfung läuft bereits hart im build-test-Job (SaxonJS).
+  # Hinweis: Versions-Pins ggf. aktualisieren. Solange nicht verifiziert,
+  # läuft der Job mit continue-on-error (blockt PRs nicht).
   # Hinweis: Versions-Pins ggf. aktualisieren. Solange nicht lokal verifiziert,
   # läuft der Job mit continue-on-error (blockt PRs nicht). Zum Scharfschalten
   # die Zeile `continue-on-error: true` entfernen.

@@ -82,8 +82,13 @@ Die Integrationstests beweisen u. a. **lückenlose, unveränderbare Nummernkreis
 
 ## E-Rechnung-Validierung
 
-- **Lokal / im Test**: EN-16931-Kernregeln (Pflichtfelder + Rechenregeln BR-CO-*) in reinem JavaScript — kein Java nötig.
-- **Im CI (autoritativ)**: der offizielle **[KoSIT-Validator](https://github.com/itplr-kosit/validator)** prüft eine erzeugte XRechnung gegen die EN-16931-/XRechnung-Schematron-Regeln (siehe `.github/workflows/ci.yml`). Versions-Pins ggf. anpassen.
+- **Offizielles EN-16931-Schematron — lokal & ohne Java:**
+  ```bash
+  npm run validate:erechnung      # führt das offizielle EN-16931-UBL-Schematron via SaxonJS aus
+  ```
+  Die erzeugte XRechnung wird gegen die echten EN-16931-Geschäftsregeln (BR-/BR-CO-…) geprüft — läuft auch als **harter Gate** in der CI.
+- **Schnelle Kernregeln** zusätzlich in reinem JS (Teil von `npm test`).
+- **XRechnung-CIUS (BR-DE):** der offizielle **[KoSIT-Validator](https://github.com/itplr-kosit/validator)** (Java) prüft in der CI zusätzlich die deutschen Sonderregeln.
 
 ## Mitmachen
 

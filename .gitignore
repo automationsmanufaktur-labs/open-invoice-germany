@@ -49,3 +49,6 @@ next-env.d.ts
 
 # MCP-/Rechnungs-Export-Ausgaben
 /exports
+
+# heruntergeladenes EN-16931-XSLT + SVRL-Reports (Validierung)
+/validation/.cache
