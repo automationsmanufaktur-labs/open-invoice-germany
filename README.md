@@ -37,6 +37,7 @@ npm run mcp   # MCP-Server (stdio) starten / in Claude Code via .mcp.json einbin
 - **E-Rechnung**: **XRechnung** (UBL, EN 16931) — Export inkl. EN-16931-Kernregel-Validierung. ZUGFeRD/Factur-X über Mustang-Sidecar (Docker).
 - **PDF-Export** ("sonstige Rechnung") mit allen Pflichtangaben.
 - **Self-hosted**: SQLite-Solo ohne Server **oder** PostgreSQL via Docker.
+- **Anmeldung**: eingebautes Admin-Konto (scrypt-Hash + signiertes Session-Cookie) — App und API geschützt.
 
 ### Status
 
@@ -59,7 +60,7 @@ npm run db:seed                 # optionale Demo-Daten
 npm run dev                     # http://localhost:3000
 ```
 
-Die SQLite-Datei liegt unter `prisma/dev.db` und gehört nur dir.
+Die SQLite-Datei liegt unter `prisma/dev.db` und gehört nur dir. Beim ersten Start legst du unter **`/setup`** dein Admin-Konto an (nach `npm run db:seed` gibt es einen Demo-Login `admin@example.com` / `demo1234` — bitte ändern). Für **Produktion**: `AUTH_SECRET` in `.env` setzen (`openssl rand -base64 32`) und hinter HTTPS betreiben.
 
 **In der App:** `Einstellungen` (Unternehmen anlegen) → `Kunden` → `Neue Rechnung` → Position erfassen → **Festschreiben** (vergibt die Nummer, macht GoBD-konform unveränderbar) → **PDF**- und **XRechnung**-Export. Komplette Schritt-für-Schritt-Anleitung: **[docs/ANLEITUNG.md](docs/ANLEITUNG.md)**.
 

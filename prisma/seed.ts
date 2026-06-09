@@ -9,8 +9,14 @@ import { dbInternal } from "@/lib/db";
 import { createDraftInvoice } from "@/domain/invoice/create";
 import { finalizeInvoice } from "@/domain/invoice/finalize";
 import { createInvoiceSchema } from "@/schemas";
+import { hashPassword } from "@/lib/auth/password";
 
 async function main() {
+  if (!(await dbInternal.user.findFirst())) {
+    await dbInternal.user.create({ data: { email: "admin@example.com", passwordHash: hashPassword("demo1234") } });
+    console.log("Demo-Admin angelegt: admin@example.com / demo1234 (bitte ändern!)");
+  }
+
   const existing = await dbInternal.organization.findFirst();
   if (existing) {
     console.log("Es sind bereits Daten vorhanden — Seed übersprungen.");

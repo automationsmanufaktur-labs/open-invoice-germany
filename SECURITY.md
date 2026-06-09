@@ -14,4 +14,4 @@ Wir bestätigen den Eingang i. d. R. innerhalb weniger Tage und halten dich übe
 - **Aufbewahrung & DSGVO**: Rechnungsdaten unterliegen gesetzlichen Aufbewahrungsfristen (siehe [COMPLIANCE.md](COMPLIANCE.md)). Lösch-/Sperrkonzept beachten.
 - **Backups**: SQLite-Datei (`prisma/dev.db`) bzw. die PostgreSQL-Datenbank regelmäßig sichern. Die GoBD-Audit-Chain schützt vor *unbemerkter* Manipulation, ersetzt aber keine Backups.
 - **Secrets**: Niemals echte Zugangsdaten committen. Alles über `.env` (ist in `.gitignore`).
-- **Self-Hosting**: Die App hat (im MVP) noch keine eingebaute Authentifizierung — betreibe sie nur in einem geschützten Netz / hinter einem Auth-Proxy, bis Multi-User-Auth verfügbar ist.
+- **Anmeldung**: Die App hat eine eingebaute Anmeldung (ein Admin-Konto, scrypt-Passwort-Hash, signiertes httpOnly-Session-Cookie; App + API sind geschützt). In **Produktion**: ein starkes `AUTH_SECRET` setzen (`openssl rand -base64 32`) und hinter **HTTPS** betreiben. Der Demo-Seed legt `admin@example.com` / `demo1234` an — diese Zugangsdaten in Produktion **sofort ändern** (bzw. eigenes Konto über `/setup` anlegen). Mehrbenutzer/Rollen/2FA sind Roadmap.

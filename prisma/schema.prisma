@@ -255,6 +255,14 @@ model Dunning {
   @@index([invoiceId])
 }
 
+/// Anmeldekonto (Self-Hosting). MVP: ein Admin-Konto, beim ersten Start angelegt.
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+}
+
 /// Append-only Änderungsprotokoll (GoBD-Kern). Hash-Chain macht Manipulation erkennbar.
 model ChangeLog {
   id       Int      @id @default(autoincrement()) // streng monotone Einfüge-Reihenfolge für die Hash-Chain

@@ -3,7 +3,7 @@
 Damit niemand böse Überraschungen erlebt: Das hier ist (noch) **nicht** abgedeckt oder nur eingeschränkt. Status: 2026-06-09.
 
 ## Betrieb & Sicherheit
-- **Keine eingebaute Anmeldung.** Das MVP hat keine Authentifizierung. Betreibe es lokal (Solo) oder hinter einem Auth-Proxy — **nicht ungeschützt im Internet**. Die Invoice-Endpunkte (`/api/invoices/[id]/…`) sind nicht mandanten-/auth-geschützt.
+- **Anmeldung vorhanden, aber Single-User.** Ein Admin-Konto schützt App **und** API (signiertes Session-Cookie). Mehrbenutzer, Rollen, Passwort-Reset und 2FA sind Roadmap. In Produktion `AUTH_SECRET` setzen + hinter HTTPS betreiben.
 - **Single-Tenant.** Das Datenmodell trägt `orgId`, die App nutzt aber eine aktive Organisation. Schreibpfade (Stammdaten) sind org-gescoped; eine vollständige Mehrmandanten-Trennung (inkl. Lese-Pfade, Postgres-RLS) ist Roadmap.
 
 ## E-Rechnung
