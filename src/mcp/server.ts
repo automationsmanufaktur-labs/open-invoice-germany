@@ -28,6 +28,9 @@ import { cancelInvoice, CancelError } from "@/domain/invoice/cancel";
 import { createPartialCreditNote, CreditError } from "@/domain/invoice/credit";
 import { recordPayment, PaymentError } from "@/domain/invoice/payment";
 import { createDunning, DunningError } from "@/domain/dunning/create";
+import { createRecurring, RecurringError } from "@/domain/recurring/create";
+import { emitRecurringNow, runDueRecurring } from "@/domain/recurring/run";
+import { intervalLabel } from "@/lib/recurring";
 import { createBusinessDocument } from "@/domain/document/create";
 import { convertDocumentToInvoice, ConvertError } from "@/domain/document/convert";
 import { loadEInvoiceData } from "@/lib/einvoice/load";
@@ -35,7 +38,7 @@ import { buildXRechnungUBL } from "@/lib/einvoice/xrechnung";
 import { renderZugferdPdf } from "@/lib/einvoice/zugferd";
 import { validateXRechnung } from "@/lib/einvoice/en16931-core";
 import { renderInvoicePdf } from "@/lib/pdf/invoice-pdf";
-import { organizationSchema, customerSchema, createInvoiceSchema, createDocumentSchema, recordPaymentSchema, TaxScheme } from "@/schemas";
+import { organizationSchema, customerSchema, createInvoiceSchema, createDocumentSchema, recordPaymentSchema, createRecurringSchema, TaxScheme } from "@/schemas";
 
 // ── Helfer ────────────────────────────────────────────────────────────────
 type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -774,6 +777,139 @@ server.registerTool(
       return ok(`${title} ${res.dunning.number} erstellt · offen ${formatCents(res.openAmountCents)} · Gesamtforderung ${formatCents(res.totalCents)}.`);
     } catch (e) {
       if (e instanceof DunningError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── create_recurring ─────────────────────────────────────────────────────────
+server.registerTool(
+  "create_recurring",
+  {
+    title: "Abo / wiederkehrende Rechnung anlegen",
+    description:
+      "Legt ein Abo an, aus dem nach Plan automatisch Rechnungen entstehen (z. B. monatlicher Wartungsvertrag). Kunde per Name, Positionen wie bei create_invoice. Mit run_recurring oder dem Cron-Lauf werden die fälligen Rechnungen erzeugt.",
+    inputSchema: {
+      customer: z.string().describe("Kundenname oder -ID"),
+      title: z.string().describe("Interne Bezeichnung, z. B. 'Wartungsvertrag Mustermann'"),
+      lines: z.array(docLineSchema).min(1),
+      interval: z.enum(["WEEKLY", "MONTHLY", "QUARTERLY", "YEARLY"]).default("MONTHLY"),
+      intervalCount: z.number().int().min(1).max(48).default(1).describe("alle N Intervalle (z. B. 2 = alle 2 Monate)"),
+      startDate: z.string().describe("Erster Stichtag YYYY-MM-DD oder 'heute'"),
+      endDate: z.string().optional().describe("Letzter Stichtag YYYY-MM-DD (optional)"),
+      anchorDay: z.number().int().min(1).max(28).optional().describe("Fester Tag im Monat (1..28)"),
+      paymentTermsDays: z.number().int().min(0).max(365).default(14),
+      autoFinalize: z.boolean().default(false).describe("true = erzeugte Rechnungen sofort festschreiben"),
+      notes: z.string().optional(),
+    },
+  },
+  async (args): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const customer = await resolveCustomer(org.id, args.customer);
+      const lines = await buildSimpleLines(org.id, args.lines);
+      const start = parseDateInput(args.startDate);
+      if (!start) throw new Error("startDate konnte nicht gelesen werden (YYYY-MM-DD oder 'heute').");
+      const input = createRecurringSchema.parse({
+        customerId: customer.id,
+        title: args.title,
+        interval: args.interval,
+        intervalCount: args.intervalCount,
+        anchorDay: args.anchorDay,
+        startDate: start,
+        endDate: parseDateInput(args.endDate),
+        paymentTermsDays: args.paymentTermsDays,
+        autoFinalize: args.autoFinalize,
+        taxScheme: "REGULAR",
+        currency: "EUR",
+        notes: args.notes,
+        lines,
+      });
+      const rec = await createRecurring(org.id, input);
+      return ok(
+        `Abo angelegt: "${rec.title}" für ${customer.name} · ${intervalLabel(rec.interval, rec.intervalCount)} · ` +
+          `erste Rechnung ab ${rec.nextRunDate.toISOString().slice(0, 10)}${rec.autoFinalize ? " (auto-festschreiben)" : ""}.\n` +
+          `ID: ${rec.id}. Erzeugen: run_recurring (alle fälligen) oder warten auf den Cron-Lauf.`,
+      );
+    } catch (e) {
+      if (e instanceof RecurringError) return fail(e.message);
+      return fail(`Konnte Abo nicht anlegen: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── list_recurring ───────────────────────────────────────────────────────────
+server.registerTool(
+  "list_recurring",
+  {
+    title: "Abos auflisten",
+    description: "Listet die Abos / wiederkehrenden Rechnungen mit Status, Rhythmus und nächstem Stichtag.",
+    inputSchema: { status: z.enum(["ACTIVE", "PAUSED", "ENDED"]).optional() },
+  },
+  async ({ status }): Promise<Result> => {
+    const org = await dbInternal.organization.findFirst();
+    if (!org) return fail("Kein Unternehmen eingerichtet. Zuerst setup_company.");
+    const recs = await dbInternal.recurringInvoice.findMany({
+      where: { orgId: org.id, ...(status ? { status } : {}) },
+      include: { customer: { select: { name: true } }, _count: { select: { invoices: true } } },
+      orderBy: { nextRunDate: "asc" },
+    });
+    return ok(
+      JSON.stringify(
+        recs.map((r) => ({
+          id: r.id,
+          title: r.title,
+          customer: r.customer.name,
+          rhythm: intervalLabel(r.interval, r.intervalCount),
+          status: r.status,
+          nextRunDate: r.status === "ENDED" ? null : r.nextRunDate.toISOString().slice(0, 10),
+          issued: r._count.invoices,
+          autoFinalize: r.autoFinalize,
+        })),
+        null,
+        2,
+      ),
+    );
+  },
+);
+
+// ── run_recurring ────────────────────────────────────────────────────────────
+server.registerTool(
+  "run_recurring",
+  {
+    title: "Fällige Abo-Rechnungen erzeugen",
+    description:
+      "Erzeugt alle aktuell fälligen Rechnungen aus den Abos (wie der Cron-Lauf). Mit 'recurring' kann gezielt EIN Abo (per ID/Name) sofort abgerechnet werden, auch wenn der Stichtag noch nicht erreicht ist.",
+    inputSchema: {
+      recurring: z.string().optional().describe("Optional: ein bestimmtes Abo (ID oder Titel) sofort abrechnen"),
+    },
+  },
+  async ({ recurring }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      if (recurring) {
+        const all = await dbInternal.recurringInvoice.findMany({ where: { orgId: org.id } });
+        const lower = recurring.trim().toLowerCase();
+        const match =
+          all.find((r) => r.id === recurring) ??
+          all.find((r) => r.title.toLowerCase() === lower) ??
+          all.filter((r) => r.title.toLowerCase().includes(lower))[0];
+        if (!match) return fail(`Kein Abo "${recurring}" gefunden.`);
+        const res = await emitRecurringNow(match.id);
+        return ok(
+          `Rechnung erzeugt für Abo "${match.title}": ${res.number ?? "Entwurf " + res.invoiceId.slice(0, 8)}` +
+            `${res.finalized ? " (festgeschrieben)" : " (Entwurf — finalize_invoice zum Festschreiben)"}.`,
+        );
+      }
+      const summaries = await runDueRecurring({ orgId: org.id });
+      const total = summaries.reduce((n, s) => n + s.emitted.length, 0);
+      if (total === 0) return ok("Keine fälligen Abos.");
+      const lines = summaries.flatMap((s) =>
+        s.emitted.map((e) => `• ${s.title}: ${e.number ?? "Entwurf " + e.invoiceId.slice(0, 8)} (Periode ${e.periodDate.toISOString().slice(0, 10)})`),
+      );
+      return ok(`${total} Rechnung(en) aus ${summaries.length} Abo(s) erzeugt:\n${lines.join("\n")}`);
+    } catch (e) {
+      if (e instanceof RecurringError) return fail(e.message);
       return fail(`Fehler: ${(e as Error).message}`);
     }
   },

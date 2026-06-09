@@ -149,3 +149,29 @@ export const recordPaymentSchema = z.object({
   isSkonto: z.boolean().default(false),
 });
 export type RecordPaymentInput = z.infer<typeof recordPaymentSchema>;
+
+// ── Wiederkehrende Rechnungen / Abos ─────────────────────────────────────────
+export const RecurInterval = z.enum(["WEEKLY", "MONTHLY", "QUARTERLY", "YEARLY"]);
+export type RecurInterval = z.infer<typeof RecurInterval>;
+
+export const createRecurringSchema = z.object({
+  customerId: z.string().min(1),
+  title: z.string().min(1),
+  interval: RecurInterval.default("MONTHLY"),
+  intervalCount: z.number().int().min(1).max(48).default(1),
+  anchorDay: z.number().int().min(1).max(28).optional(),
+  startDate: z.coerce.date(),
+  endDate: z.coerce.date().optional(),
+  taxScheme: TaxScheme.default("REGULAR"),
+  currency: z.string().length(3).default("EUR"),
+  paymentTermsDays: z.number().int().min(0).max(365).default(14),
+  autoFinalize: z.boolean().default(false),
+  notes: z.string().optional(),
+  lines: z.array(invoiceLineInputSchema).min(1),
+});
+export type CreateRecurringInput = z.infer<typeof createRecurringSchema>;
+
+export const updateRecurringStatusSchema = z.object({
+  status: z.enum(["ACTIVE", "PAUSED", "ENDED"]),
+});
+export type UpdateRecurringStatusInput = z.infer<typeof updateRecurringStatusSchema>;

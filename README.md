@@ -38,14 +38,18 @@ npm run mcp   # start the MCP server (stdio) / wire it into Claude Code via .mcp
 - **GoBD core**: finalisation (draft → immutable), gapless number ranges, append-only audit **hash-chain**, cancellation instead of deletion.
 - **§ 14 UStG**: mandatory-field check blocks finalisation when data is missing.
 - **Tax schemes**: standard rating (19/7/0), small business (§ 19), reverse charge (§ 13b), intra-EU supply, margin scheme (§ 25a), small amount (§ 33).
-- **E-invoice**: **XRechnung** (UBL, EN 16931) export incl. EN-16931 core-rule validation. ZUGFeRD/Factur-X via the Mustang sidecar (Docker).
+- **E-invoice**: **XRechnung** (UBL, EN 16931) **and ZUGFeRD/Factur-X hybrid PDF** (embedded EN-16931 CII), both validated against the **official Schematron** rules (SaxonJS, no Java) — cross-checked by the KoSIT validator in CI.
+- **Documents**: quotes, order confirmations, pro-forma — convertible into an invoice.
+- **Payments & dunning**: record (partial) payments; staged reminders (payment reminder → 1st/2nd dunning) with **default interest** (§ 288 BGB, day-accurate) + €40 flat fee (B2B), each as a PDF.
+- **Recurring invoices / subscriptions**: weekly–yearly templates, optional auto-finalisation, run via UI/MCP or cron (`npm run recurring:run`).
+- **Credit notes**: full cancellation **or** partial credit, original stays finalised.
 - **PDF export** ("other invoice") with all mandatory fields.
 - **Self-hosted**: SQLite solo without a server **or** PostgreSQL via Docker.
 - **Sign-in**: built-in admin account (scrypt hash + signed session cookie) — app and API protected.
 
 ### Status
 
-MVP. What works: master data/customers/products, quote & invoice model, draft → finalise → cancel, PDF + XRechnung export, GoBD number range + audit. On the roadmap: dunning UI, recurring invoices, ZUGFeRD hybrid, DATEV export, B2G/Leitweg-ID, OSS/ZM, multi-user. See [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) (MVP / stage 2 / stage 3) and the honest list of **[known limitations](docs/LIMITATIONEN.md)**.
+MVP. What works: master data/customers/products, quotes & invoices, draft → finalise → cancel, partial credit notes, **payments + dunning (§ 288 BGB)**, **recurring invoices/subscriptions**, PDF + **XRechnung + ZUGFeRD** export, GoBD number range + audit. On the roadmap: DATEV/CSV export, B2G/Leitweg-ID EAS codes, OSS/ZM, multi-user, built-in scheduler. See [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) (MVP / stage 2 / stage 3) and the honest list of **[known limitations](docs/LIMITATIONEN.md)**.
 
 ## Tech stack
 

@@ -53,6 +53,27 @@ Auf der Rechnungs-Detailseite: „**Festschreiben**". Dabei passiert (GoBD-konfo
 ### Schritt 6 — Exportieren
 - **PDF** — die klassische „sonstige Rechnung" für E-Mail/Druck.
 - **XRechnung (XML)** — die strukturierte E-Rechnung nach EN 16931 für B2B/Behörden.
+- **ZUGFeRD (PDF)** — Hybrid: lesbares PDF mit eingebettetem E-Rechnungs-XML.
+
+### Schritt 7 — Zahlung & Mahnwesen (Rechnungs-Detailseite)
+Unter „**Zahlung & Mahnwesen**":
+- **Zahlung buchen** — Teil- oder Vollzahlung; der Status springt auf *teilbezahlt* bzw. *bezahlt*.
+- **Nächste Mahnstufe** — erzeugt Zahlungserinnerung (Stufe 0, kostenfrei) → 1./2. Mahnung. Ab Stufe 1 mit **Verzugszins** (§ 288 BGB, taggenau) und **40-€-Pauschale** (nur bei Geschäftskunden, einmalig). Jede Mahnung gibt es als PDF.
+
+### Schritt 8 — Wiederkehrende Rechnungen / Abos (`Abos`)
+Für regelmäßige Leistungen (Wartung, Retainer, Miete): Lege ein **Abo** an — Kunde, Positionen, Rhythmus (wöchentlich bis jährlich), Startdatum, optional Enddatum. Wahlweise werden die erzeugten Rechnungen **automatisch festgeschrieben**.
+- **Jetzt Rechnung erzeugen** auf der Abo-Seite erstellt sofort die nächste Rechnung.
+- **Automatisch** laufen fällige Abos per Cron — siehe „[Datensicherung & Betrieb](#5-datensicherung--betrieb)":
+
+```bash
+npm run recurring:run        # erzeugt alle fälligen Abo-Rechnungen
+```
+
+Beispiel-Crontab (täglich 06:00):
+```
+0 6 * * *  cd /pfad/zur/app && /usr/bin/npm run recurring:run >> recurring.log 2>&1
+```
+Alternativ per HTTP: `GET /api/cron/run-recurring` (mit Header `Authorization: Bearer $CRON_SECRET`, sofern `CRON_SECRET` gesetzt ist).
 
 ---
 
@@ -64,6 +85,8 @@ Auf der Rechnungs-Detailseite: „**Festschreiben**". Dabei passiert (GoBD-konfo
 | **Festgeschrieben** | Unveränderbar, Nummer vergeben. GoBD-konform. |
 | **Storno** | Eine festgeschriebene Rechnung wird nicht gelöscht, sondern durch eine **Storno-Gutschrift** neutralisiert. Das Original bleibt erhalten. |
 | **Nummernkreis** | Fortlaufende, einmalige Nummern. Verworfene Entwürfe verbrauchen **keine** Nummer. |
+| **Abo** | Vorlage, aus der nach Plan Rechnungs-Entwürfe (oder direkt festgeschriebene Rechnungen) entstehen. Das Abo selbst ist kein Beleg. |
+| **Verzugszins** | Zins ab Stufe 1 der Mahnung nach § 288 BGB (Basiszins + 5 Pp B2C / 9 Pp B2B), taggenau auf den offenen Betrag. |
 
 ---
 

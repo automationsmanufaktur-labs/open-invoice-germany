@@ -45,6 +45,7 @@ model Organization {
   products     Product[]
   quotes       Quote[]
   invoices     Invoice[]
+  recurring    RecurringInvoice[]
   numberRanges NumberRange[]
   changeLogs   ChangeLog[]
 }
@@ -74,8 +75,9 @@ model Customer {
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
 
-  quotes   Quote[]
-  invoices Invoice[]
+  quotes    Quote[]
+  invoices  Invoice[]
+  recurring RecurringInvoice[]
 
   @@index([orgId])
 }
@@ -191,6 +193,8 @@ model Invoice {
   consumerRetentionHint Boolean  @default(false) // §14 Abs.4 Nr.9 / §14b Abs.1 S.5
   reversedByInvoiceId   String?  // Storno-Verknüpfung
   correctsInvoiceId     String?  // Korrekturrechnung-Verknüpfung (§31 Abs.5 UStDV)
+  recurringInvoiceId    String?  // Herkunft: aus Abo/Dauerrechnung erzeugt
+  recurringInvoice      RecurringInvoice? @relation(fields: [recurringInvoiceId], references: [id])
   xmlFormat             String?  // XRECHNUNG | ZUGFERD
   xmlHash               String?
   pdfPath               String?
@@ -204,6 +208,7 @@ model Invoice {
 
   @@index([orgId])
   @@index([customerId])
+  @@index([recurringInvoiceId])
 }
 
 model InvoiceLine {
@@ -255,6 +260,57 @@ model Dunning {
   createdAt                DateTime @default(now())
 
   @@index([invoiceId])
+}
+
+/// Wiederkehrende Rechnung / Abo — Vorlage, aus der nach Plan reguläre Rechnungs-
+/// ENTWÜRFE erzeugt werden. Selbst KEIN Beleg (frei editierbar). Die erzeugten
+/// Invoices durchlaufen Festschreibung/Nummernkreis/Hash-Chain wie jede Rechnung.
+model RecurringInvoice {
+  id               String   @id @default(cuid())
+  orgId            String
+  org              Organization @relation(fields: [orgId], references: [id])
+  customerId       String
+  customer         Customer @relation(fields: [customerId], references: [id])
+  title            String   // interne Bezeichnung, z. B. "Wartungsvertrag Mustermann"
+  status           String   @default("ACTIVE") // ACTIVE | PAUSED | ENDED
+  interval         String   @default("MONTHLY") // WEEKLY | MONTHLY | QUARTERLY | YEARLY
+  intervalCount    Int      @default(1) // alle N Intervalle (z. B. 2 = alle 2 Monate)
+  anchorDay        Int?     // fixer Tag im Monat (1..28) für MONTHLY/QUARTERLY/YEARLY
+  startDate        DateTime
+  nextRunDate      DateTime // Stichtag der nächsten Erzeugung
+  endDate          DateTime?
+  taxScheme        String   @default("REGULAR")
+  currency         String   @default("EUR")
+  paymentTermsDays Int      @default(14)
+  notes            String?
+  autoFinalize     Boolean  @default(false) // true = erzeugte Rechnung sofort festschreiben
+  lastRunAt        DateTime?
+  issuedCount      Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  lines    RecurringInvoiceLine[]
+  invoices Invoice[]
+
+  @@index([orgId])
+  @@index([customerId])
+  @@index([status, nextRunDate])
+}
+
+model RecurringInvoiceLine {
+  id                 String @id @default(cuid())
+  recurringInvoiceId String
+  recurringInvoice   RecurringInvoice @relation(fields: [recurringInvoiceId], references: [id], onDelete: Cascade)
+  position           Int
+  description        String
+  quantityMilli      Int
+  unit               String @default("C62")
+  unitNetPriceCents  Int
+  taxRate            Int
+  taxCategory        String @default("S")
+  discountPermille   Int    @default(0)
+
+  @@index([recurringInvoiceId])
 }
 
 /// Anmeldekonto (Self-Hosting). MVP: ein Admin-Konto, beim ersten Start angelegt.

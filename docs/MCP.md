@@ -63,6 +63,10 @@ In Claude Code mit `/mcp` prüfen, dass `open-invoice-germany` verbunden ist. (C
 
 > **„Exportier die XRechnung und das PDF."**
 
+> **„Leg einen monatlichen Wartungsvertrag für Müller über 99 € an, ab dem 1. des nächsten Monats, und schreib die Rechnungen automatisch fest."**
+
+> **„Welche Abos sind fällig? Erzeuge die fälligen Rechnungen."**
+
 Claude ruft im Hintergrund die passenden Tools auf (`setup_company` → `upsert_customer` → `upsert_product` → `create_invoice` → `finalize_invoice` → `export_invoice`) und legt die Dateien unter `exports/` ab — inkl. EN-16931-Validierung.
 
 ## 3. Verfügbare Tools
@@ -76,8 +80,15 @@ Claude ruft im Hintergrund die passenden Tools auf (`setup_company` → `upsert_
 | `create_invoice` | Rechnung als Entwurf (Kunde per Name, Positionen in €/Menge oder via gespeicherter Leistung) |
 | `finalize_invoice` | Festschreiben — prüft Pflichtangaben, vergibt Nummer, macht unveränderbar |
 | `cancel_invoice` | Storno-Gutschrift (Original bleibt erhalten) |
+| `credit_invoice` | Teilgutschrift / Teilerstattung (Original bleibt festgeschrieben) |
+| `record_payment` | Zahlungseingang erfassen → Status (bezahlt/teilbezahlt) |
+| `create_dunning` | Nächste Mahnstufe (Zahlungserinnerung → 1./2. Mahnung, Verzugszins § 288 BGB + 40-€-Pauschale B2B) |
 | `get_invoice` / `list_invoices` | Anzeigen/Auflisten |
-| `export_invoice` | PDF + XRechnung in Datei + Validierungsreport |
+| `export_invoice` | PDF + XRechnung + ZUGFeRD in Datei + Validierungsreport |
+| `create_document` / `list_documents` | Angebot / Auftragsbestätigung / Proforma |
+| `convert_document_to_invoice` | Dokument → Rechnungs-Entwurf |
+| `create_recurring` / `list_recurring` | Abo / wiederkehrende Rechnung anlegen & auflisten |
+| `run_recurring` | Fällige Abo-Rechnungen erzeugen (alle, oder ein Abo sofort) |
 
 ## 4. Was die KI **nicht** kaputt machen kann
 

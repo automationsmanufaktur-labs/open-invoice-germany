@@ -3,7 +3,8 @@ import { SESSION_COOKIE, verifySessionToken } from "@/lib/auth/session";
 
 // Öffentlich erreichbar (ohne Anmeldung):
 const PUBLIC_EXACT = new Set(["/"]);
-const PUBLIC_PREFIXES = ["/login", "/setup", "/api/auth"];
+// /api/cron ist nicht sessiongeschützt, sondern via CRON_SECRET in der Route.
+const PUBLIC_PREFIXES = ["/login", "/setup", "/api/auth", "/api/cron"];
 
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;

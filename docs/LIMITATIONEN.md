@@ -14,6 +14,10 @@ Damit niemand böse Überraschungen erlebt: Das hier ist (noch) **nicht** abgede
 - **PaymentMeans** wird nur bei hinterlegter IBAN ausgegeben.
 - **Positions-Rabatte** (AllowanceCharge BG-27/28) und strukturierte Skonto-Angaben (BT-20) sind noch nicht modelliert.
 
+## Zahlung, Mahnwesen & Abos
+- **Mahnwesen** vorhanden: Zahlungseingänge erfassen, gestufte Mahnungen (Zahlungserinnerung → 1./2. Mahnung) mit Verzugszins (§ 288 BGB, taggenau) + 40-€-Pauschale (nur B2B, einmal). Der **Basiszinssatz ist als Default hinterlegt** (1,27 % für 2026) und muss zum jeweiligen Halbjahr gepflegt/übergeben werden — keine automatische Aktualisierung.
+- **Wiederkehrende Rechnungen/Abos** vorhanden: Vorlage mit Rhythmus (wöchentlich–jährlich), optional Auto-Festschreiben. Der Lauf erzeugt fällige Rechnungen — manuell (UI/MCP) oder per Cron (`npm run recurring:run`, bzw. `GET /api/cron/run-recurring` mit `CRON_SECRET`). Es gibt **keinen eingebauten Scheduler**; der Cron-/Timer-Aufruf muss self-hosted eingerichtet werden. Mengen/Preise sind je Lauf fix (keine nutzungsbasierte Abrechnung).
+
 ## Daten & Recht
 - **PostgreSQL** nutzt im Docker-Setup vorerst `prisma db push` (eigene Postgres-Migrationen sind Roadmap). Solo/SQLite nutzt echte Migrationen.
 - **Nummernkreise** sind standardmäßig jahresbasiert; eine UI zum Vorkonfigurieren (Präfix/Muster/jahresunabhängig) fehlt noch.
@@ -21,7 +25,7 @@ Damit niemand böse Überraschungen erlebt: Das hier ist (noch) **nicht** abgede
 - **GoBD:** Die Software ermöglicht Unveränderbarkeit + Audit-Chain, ersetzt aber **nicht** die anwenderseitige **Verfahrensdokumentation**.
 
 ## Funktionsumfang (geplant)
-Mahnwesen-UI, wiederkehrende Rechnungen/Abos, DATEV-/CSV-Export, OSS/ZM, USt-Voranmeldungs-Auswertung, VIES-Prüfung, Mehrbenutzer/Auth.
+DATEV-/CSV-Export, OSS/ZM, USt-Voranmeldungs-Auswertung, VIES-Prüfung, Mehrbenutzer/Auth, eingebauter Scheduler, nutzungsbasierte Abo-Abrechnung.
 
 ---
 

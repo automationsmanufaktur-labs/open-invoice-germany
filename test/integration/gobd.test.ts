@@ -6,6 +6,8 @@ import { cancelInvoice } from "@/domain/invoice/cancel";
 import { createPartialCreditNote } from "@/domain/invoice/credit";
 import { recordPayment } from "@/domain/invoice/payment";
 import { createDunning } from "@/domain/dunning/create";
+import { createRecurring } from "@/domain/recurring/create";
+import { emitRecurringNow, runDueRecurring } from "@/domain/recurring/run";
 import { createBusinessDocument } from "@/domain/document/create";
 import { convertDocumentToInvoice } from "@/domain/document/convert";
 import { verifyChain, type ChainEntry } from "@/domain/changelog";
@@ -186,5 +188,78 @@ describe("GoBD: Nummernkreis + Unveränderbarkeit", () => {
     expect(r1.level).toBe(1); // 1. Mahnung -> Verzugszins + 40-€-Pauschale (B2B)
     expect(r1.dunning.interestAmountCents).toBeGreaterThan(0);
     expect(r1.dunning.flatFee40Cents).toBe(4000);
+  });
+
+  it("Abo: Lauf erzeugt Rechnung, schreibt nextRunDate fort, autoFinalize vergibt Nummer", async () => {
+    const rec = await createRecurring(orgId, {
+      customerId,
+      title: "Wartungsvertrag Test",
+      interval: "MONTHLY",
+      intervalCount: 1,
+      startDate: new Date("2026-06-01T09:00:00"),
+      taxScheme: "REGULAR",
+      currency: "EUR",
+      paymentTermsDays: 14,
+      autoFinalize: true,
+      lines: [
+        { description: "Wartung", quantityMilli: 1000, unit: "C62", unitNetPriceCents: 10000, taxRate: 19, taxCategory: "S", discountPermille: 0 },
+      ],
+    });
+    expect(rec.nextRunDate.toISOString().slice(0, 10)).toBe("2026-06-01");
+
+    // Fälliger Stichtag (01.06.) liegt vor FIX_DATE (09.06.) → ein Beleg
+    const summaries = await runDueRecurring({ now: FIX_DATE, orgId });
+    const mine = summaries.find((s) => s.recurringId === rec.id);
+    expect(mine).toBeDefined();
+    expect(mine!.emitted).toHaveLength(1);
+    const emitted = mine!.emitted[0];
+    expect(emitted.finalized).toBe(true);
+    expect(emitted.number).toMatch(/^RE-2026-\d{4}$/);
+
+    const inv = await prisma.invoice.findUnique({ where: { id: emitted.invoiceId } });
+    expect(inv!.status).toBe("FINALIZED");
+    expect(inv!.grossTotalCents).toBe(11900); // 100 € + 19 %
+    expect(inv!.recurringInvoiceId).toBe(rec.id);
+    expect(inv!.deliveryDate!.toISOString().slice(0, 10)).toBe("2026-06-01"); // Leistungsdatum = Periode
+
+    const after = await prisma.recurringInvoice.findUnique({ where: { id: rec.id } });
+    expect(after!.issuedCount).toBe(1);
+    expect(after!.nextRunDate.toISOString().slice(0, 10)).toBe("2026-07-01"); // fortgeschrieben
+    expect(after!.status).toBe("ACTIVE");
+
+    // Erneuter Lauf zum selben Stichtag erzeugt nichts (nextRunDate liegt jetzt in der Zukunft)
+    const again = await runDueRecurring({ now: FIX_DATE, orgId });
+    expect(again.find((s) => s.recurringId === rec.id)).toBeUndefined();
+
+    // Manuelle Sofort-Abrechnung ignoriert den Stichtag (Entwurf, da kein autoFinalize? hier doch true)
+    const manual = await emitRecurringNow(rec.id, { now: FIX_DATE });
+    expect(manual.finalized).toBe(true);
+    const after2 = await prisma.recurringInvoice.findUnique({ where: { id: rec.id } });
+    expect(after2!.issuedCount).toBe(2);
+    expect(after2!.nextRunDate.toISOString().slice(0, 10)).toBe("2026-08-01");
+  });
+
+  it("Abo: endet automatisch nach dem letzten Stichtag", async () => {
+    const rec = await createRecurring(orgId, {
+      customerId,
+      title: "Befristetes Abo",
+      interval: "MONTHLY",
+      intervalCount: 1,
+      startDate: new Date("2026-05-01T09:00:00"),
+      endDate: new Date("2026-05-15T09:00:00"), // nur ein Lauf, danach > endDate
+      taxScheme: "REGULAR",
+      currency: "EUR",
+      paymentTermsDays: 14,
+      autoFinalize: false,
+      lines: [
+        { description: "Pos", quantityMilli: 1000, unit: "C62", unitNetPriceCents: 5000, taxRate: 19, taxCategory: "S", discountPermille: 0 },
+      ],
+    });
+    const summaries = await runDueRecurring({ now: FIX_DATE, orgId, maxPerAbo: 12 });
+    const mine = summaries.find((s) => s.recurringId === rec.id);
+    expect(mine!.emitted).toHaveLength(1); // nächster Stichtag (01.06.) > endDate → Stopp
+    expect(mine!.emitted[0].finalized).toBe(false); // Entwurf
+    const after = await prisma.recurringInvoice.findUnique({ where: { id: rec.id } });
+    expect(after!.status).toBe("ENDED");
   });
 });
