@@ -14,6 +14,7 @@ export interface NumberPatternContext {
   padding: number;
   year: number;
   month: number;
+  day: number;
 }
 
 const DOC_TYPE_DEFAULT_PREFIX: Record<string, string> = {
@@ -24,6 +25,9 @@ const DOC_TYPE_DEFAULT_PREFIX: Record<string, string> = {
   AUFTRAGSBESTAETIGUNG: "AB-",
   PROFORMA: "PF-",
   DUNNING: "MA-",
+  DELIVERY_NOTE: "LS-",
+  CUSTOMER: "K-",
+  PRODUCT: "P-",
 };
 
 export function defaultPrefix(docType: string): string {
@@ -32,7 +36,7 @@ export function defaultPrefix(docType: string): string {
 
 /**
  * Setzt ein Nummern-Pattern auf. Platzhalter:
- *   {PREFIX} {YYYY} {YY} {MM} {SEQ}
+ *   {PREFIX} {YYYY} {YY} {MM} {DD} {SEQ} {SEQ:n}
  */
 export function formatDocumentNumber(pattern: string, ctx: NumberPatternContext): string {
   return pattern
@@ -40,5 +44,8 @@ export function formatDocumentNumber(pattern: string, ctx: NumberPatternContext)
     .replace(/\{YYYY\}/g, String(ctx.year).padStart(4, "0"))
     .replace(/\{YY\}/g, String(ctx.year % 100).padStart(2, "0"))
     .replace(/\{MM\}/g, String(ctx.month).padStart(2, "0"))
+    .replace(/\{DD\}/g, String(ctx.day).padStart(2, "0"))
+    // {SEQ:n} — explizite Stellenzahl hat Vorrang vor padding
+    .replace(/\{SEQ:(\d+)\}/g, (_m, n: string) => String(ctx.seq).padStart(Number(n), "0"))
     .replace(/\{SEQ\}/g, String(ctx.seq).padStart(ctx.padding, "0"));
 }

@@ -14,22 +14,6 @@ export function roundHalfUp(value: number): number {
   return value < 0 ? -Math.round(-value) : Math.round(value);
 }
 
-/**
- * Netto-Betrag einer Position in Cent.
- * @param quantityMilli Menge in Milliunits (z.B. 2,5 Stück = 2500)
- * @param unitNetPriceCents Einzelpreis netto in Cent
- * @param discountPermille Rabatt in Promille (0..1000)
- */
-export function computeLineNetCents(
-  quantityMilli: number,
-  unitNetPriceCents: number,
-  discountPermille = 0,
-): number {
-  const gross = (quantityMilli * unitNetPriceCents) / MILLI;
-  const afterDiscount = gross * (1 - discountPermille / MILLI);
-  return roundHalfUp(afterDiscount);
-}
-
 /** Formatiert Cent als lokalisierten Währungs-String (Default de-DE/EUR). */
 export function formatCents(cents: number, currency = "EUR", locale = "de-DE"): string {
   return new Intl.NumberFormat(locale, { style: "currency", currency }).format(cents / CENTS_PER_EURO);

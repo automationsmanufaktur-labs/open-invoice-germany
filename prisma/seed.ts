@@ -10,6 +10,7 @@ import { createDraftInvoice } from "@/domain/invoice/create";
 import { finalizeInvoice } from "@/domain/invoice/finalize";
 import { createInvoiceSchema } from "@/schemas";
 import { hashPassword } from "@/lib/auth/password";
+import { ensureOrgMasterdata } from "@/domain/masterdata/ensure";
 
 async function main() {
   if (!(await dbInternal.user.findFirst())) {
@@ -40,6 +41,8 @@ async function main() {
       electronicAddress: "info@muster-handwerk.de",
     },
   });
+
+  await ensureOrgMasterdata(dbInternal, org.id);
 
   const customer = await dbInternal.customer.create({
     data: {

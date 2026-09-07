@@ -6,6 +6,8 @@ import { DUNNING_LEVEL_TITLE } from "@/lib/dunning";
 export interface DunningPdfData {
   number: string;
   level: number;
+  /** Name der Mahnstufe (Phase 6) — Titel im PDF, Fallback DUNNING_LEVEL_TITLE[level]. */
+  stageName?: string | null;
   sentDate: Date;
   newDueDate: Date;
   currency: string;
@@ -33,6 +35,8 @@ export interface DunningPdfData {
   openAmountCents: number;
   interestCents: number;
   flatFee40Cents: number;
+  /** Mahnkosten der Stufe (Phase 6, `DunningStage.feeCents`, nur order >= 2). */
+  feeCents: number;
   lateFeeCents: number;
   totalCents: number;
   daysOverdue: number;
@@ -59,7 +63,7 @@ export function renderDunningPdf(data: DunningPdfData): Promise<Buffer> {
     const cur = data.currency;
     const left = 50;
     const right = 545;
-    const title = DUNNING_LEVEL_TITLE[data.level] ?? `${data.level}. Mahnung`;
+    const title = data.stageName || DUNNING_LEVEL_TITLE[data.level] || `${data.level}. Mahnung`;
 
     doc.fontSize(9).fillColor("#555");
     doc.text(`${data.seller.name} · ${data.seller.addressLine1} · ${data.seller.postalCode} ${data.seller.city}`, left, 50);
@@ -91,7 +95,8 @@ export function renderDunningPdf(data: DunningPdfData): Promise<Buffer> {
     row(`Rechnung ${data.invoiceNumber} vom ${deDate(data.invoiceDate)} — offener Betrag`, formatCents(data.openAmountCents, cur));
     if (data.interestCents > 0) row(`Verzugszinsen (${data.daysOverdue} Tage)`, formatCents(data.interestCents, cur));
     if (data.flatFee40Cents > 0) row("Verzugspauschale (§ 288 Abs. 5 BGB)", formatCents(data.flatFee40Cents, cur));
-    if (data.lateFeeCents > 0) row("Mahnkosten", formatCents(data.lateFeeCents, cur));
+    if (data.feeCents > 0) row("Mahnkosten", formatCents(data.feeCents, cur));
+    if (data.lateFeeCents > 0) row("Sonstige Auslagen", formatCents(data.lateFeeCents, cur));
     y += 4;
     doc.moveTo(left, y).lineTo(right, y).strokeColor("#ccc").stroke();
     y += 6;

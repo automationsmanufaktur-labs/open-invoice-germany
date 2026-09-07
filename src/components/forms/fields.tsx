@@ -15,14 +15,32 @@ interface BaseField {
   className?: string;
 }
 
-export function TextField({ label, name, defaultValue, required, placeholder, hint, className, type = "text" }: BaseField & { type?: string }) {
+export function TextField({
+  label,
+  name,
+  defaultValue,
+  required,
+  placeholder,
+  hint,
+  className,
+  type = "text",
+  onChange,
+}: BaseField & { type?: string; onChange?: (e: React.ChangeEvent<HTMLInputElement>) => void }) {
   return (
     <label className={`flex flex-col gap-1 text-sm ${className ?? ""}`}>
       <span className="font-medium text-slate-700">
         {label}
         {required && <span className="text-rose-500"> *</span>}
       </span>
-      <input className={inputCls} name={name} type={type} defaultValue={defaultValue ?? undefined} required={required} placeholder={placeholder} />
+      <input
+        className={inputCls}
+        name={name}
+        type={type}
+        defaultValue={defaultValue ?? undefined}
+        required={required}
+        placeholder={placeholder}
+        onChange={onChange}
+      />
       {hint && <span className="text-xs text-slate-400">{hint}</span>}
     </label>
   );
@@ -48,11 +66,12 @@ export function SelectField({
   options,
   hint,
   className,
-}: Omit<BaseField, "placeholder" | "required"> & { options: { value: string; label: string }[] }) {
+  onChange,
+}: Omit<BaseField, "placeholder" | "required"> & { options: { value: string; label: string }[]; onChange?: (e: React.ChangeEvent<HTMLSelectElement>) => void }) {
   return (
     <label className={`flex flex-col gap-1 text-sm ${className ?? ""}`}>
       <span className="font-medium text-slate-700">{label}</span>
-      <select className={inputCls} name={name} defaultValue={defaultValue ?? options[0]?.value}>
+      <select className={inputCls} name={name} defaultValue={defaultValue ?? options[0]?.value} onChange={onChange}>
         {options.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}

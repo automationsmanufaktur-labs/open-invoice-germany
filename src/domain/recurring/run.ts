@@ -12,9 +12,10 @@
  * fortgeschrieben (nicht von `now`), damit der Rhythmus stabil bleibt.
  */
 import { dbInternal } from "@/lib/db";
-import { computeLineNetCents } from "@/lib/money";
+import { computeLineNet } from "@/lib/pricing/line";
 import { computeTaxBreakdown } from "@/lib/tax";
 import { appendChangeLog } from "@/domain/audit";
+import { linkDocuments } from "@/domain/relations";
 import { finalizeWithinTx } from "@/domain/invoice/finalize";
 import { advanceDate, type RecurInterval } from "@/lib/recurring";
 import { RecurringError } from "./create";
@@ -55,7 +56,14 @@ async function emitOne(recurringId: string, now: Date, actor: string): Promise<{
       taxRate: l.taxRate,
       taxCategory: l.taxCategory,
       discountPermille: l.discountPermille,
-      lineNetCents: computeLineNetCents(l.quantityMilli, l.unitNetPriceCents, l.discountPermille),
+      // W4 — dieselbe Rundung wie bei der manuellen Rechnung (computeLineNet aus
+      // src/lib/pricing/line.ts): erst grossLineCents runden, dann den Prozentabzug
+      // runden, statt in einem Schritt (computeLineNetCents rundete abweichend).
+      lineNetCents: computeLineNet({
+        quantityMilli: l.quantityMilli,
+        unitNetPriceCents: l.unitNetPriceCents,
+        discountPermille: l.discountPermille,
+      }).lineNetCents,
     }));
     const totals = computeTaxBreakdown(
       lines.map((l) => ({ lineNetCents: l.lineNetCents, taxRate: l.taxRate, taxCategory: l.taxCategory })),
@@ -80,6 +88,8 @@ async function emitOne(recurringId: string, now: Date, actor: string): Promise<{
         lines: { create: lines },
       },
     });
+
+    await linkDocuments(tx, { orgId: rec.orgId, fromType: "INVOICE", fromId: invoice.id, toType: "RECURRING", toId: rec.id, relationType: "GENERATED_BY" });
 
     await appendChangeLog(tx, {
       orgId: rec.orgId,
