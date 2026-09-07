@@ -79,6 +79,48 @@ cp .env.example .env            # switch DATABASE_URL to the postgresql:// line
 docker compose up --build
 ```
 
+**Upgrading an existing instance.** If the database was created with an older
+version using `prisma db push`, it has no migration history. The container will
+refuse to start and print the one command needed. Take a backup first.
+
+**Do not run `migrate resolve` blindly.** The `0_init` baseline reflects the
+current schema, including `RecurringInvoice`, `RecurringInvoiceLine` and
+`Invoice.recurringInvoiceId`. An older instance may predate these tables. If you
+mark the baseline as applied without checking, Prisma believes the schema is
+complete and later queries fail with `column ... does not exist`. Verify first:
+
+```bash
+docker compose run --rm app \
+  npx prisma migrate diff --from-url "$DATABASE_URL" \
+    --to-schema-datamodel prisma/schema.postgres.prisma --script
+```
+
+- **Empty output** (only the comment "This is an empty migration"): the database
+  already matches the baseline. `migrate resolve --applied 0_init` below is safe.
+- **Output contains only `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN` /
+  `CREATE INDEX` / `ALTER TABLE … ADD CONSTRAINT` (foreign keys)**: the database predates the baseline. Review the SQL, apply it
+  with `docker compose run --rm app npx prisma db execute --url "$DATABASE_URL"
+  --stdin`, then continue with `migrate resolve`.
+- **Output contains any `DROP`**: stop. Do not apply it and do not run
+  `migrate resolve`. The database holds data the baseline does not account for —
+  get a second opinion before proceeding.
+
+Once the diff is clean (or has been applied):
+
+```bash
+docker compose run --rm app \
+  npx prisma migrate resolve --config prisma.postgres.config.ts --applied 0_init
+```
+
+After that the container starts normally and future schema changes go through
+`prisma migrate deploy`.
+
+**If a migration entry in `_prisma_migrations` is marked failed**, `migrate
+deploy` refuses to proceed and the container will not start. This is intentional
+(fail-closed) rather than silently continuing on an uncertain schema. Check what
+the migration partially applied, then resolve it with `prisma migrate resolve
+--rolled-back <name>`.
+
 `docker-compose.yml` starts the app + PostgreSQL + the **Mustang** sidecar (XRechnung/ZUGFeRD generation & validation). The Postgres schema lives in `prisma/schema.postgres.prisma` (model-identical, only a different datasource).
 
 ## Tests
