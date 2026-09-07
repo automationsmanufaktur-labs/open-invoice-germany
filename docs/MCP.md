@@ -87,8 +87,22 @@ Claude ruft im Hintergrund die passenden Tools auf (`setup_company` → `upsert_
 | `export_invoice` | PDF + XRechnung + ZUGFeRD in Datei + Validierungsreport |
 | `create_document` / `list_documents` | Angebot / Auftragsbestätigung / Proforma |
 | `convert_document_to_invoice` | Dokument → Rechnungs-Entwurf |
+| `convert_document` | Generische Umwandlung: Angebot → AB, Angebot/AB/Proforma → Rechnung, Angebot/AB/Rechnung → Lieferschein (optional Teilmengen) |
+| `create_delivery_note` | Lieferschein ohne Quelldokument anlegen (Direktlieferung) |
+| `set_document_status` | Status eines Angebots/einer AB oder eines Lieferscheins setzen (MARK_SENT/MARK_ACCEPTED/MARK_REJECTED/MARK_CREATED/MARK_DELIVERED/CANCEL/ARCHIVE/UNARCHIVE) |
+| `duplicate_document` | Angebot/AB/Proforma, Lieferschein oder Rechnung als neuen Entwurf duplizieren |
 | `create_recurring` / `list_recurring` | Abo / wiederkehrende Rechnung anlegen & auflisten |
 | `run_recurring` | Fällige Abo-Rechnungen erzeugen (alle, oder ein Abo sofort) |
+| `create_share_link` | Angebots-Annahmelink (ohne Login) erzeugen — liefert die URL einmalig in der Antwort |
+| `revoke_share_link` | Angebots-Annahmelink widerrufen |
+| `list_share_links` | Annahme-Links eines Angebots auflisten (Status/Aufrufe/Entscheidung, nie der Klartext-Token) |
+| `save_document_settings` | Angebotsannahme-Einstellungen speichern (Automatik nach Annahme, Link-Gültigkeitsdauer, IP-Speicherung) |
+| `update_invoice_draft` | Rechnungsentwurf bearbeiten (nur `DRAFT`) — Kopffelder (Betreff, Bestellnummer BT-13, interne Referenz, Ansprechpartner, Rechnungs-/Lieferadresse) sowie Positionen inkl. `lineType` (ITEM/HEADING/TEXT/SUBTOTAL); Rechnungstyp bleibt unveränderbar |
+| `add_attachment` / `list_attachments` / `remove_attachment` | Beleganhänge verwalten (Rechnung/Angebot/Lieferschein/Abo/Mahnung) — Upload als Base64, dieselben Grenzen wie im UI (10 MB je Datei, 50 MB je Beleg) |
+| `create_partial_invoice` | Teilrechnung aus einem Angebot/einer AB oder einem Lieferschein — Prozent, Netto-/Bruttobetrag, oder einzelne Positionen/Mengen |
+| `create_downpayment_invoice` | Abschlagsrechnung vor Leistungserbringung (nur aus Angebot/AB) — Prozent oder Betrag, netto oder brutto; löst § 13 Abs. 1 Nr. 1 Buchst. a Satz 4 UStG aus |
+| `create_final_invoice` | Schlussrechnung über die Gesamtleistung — setzt mindestens eine festgeschriebene, nicht stornierte Abschlagsrechnung voraus; setzt die Abschläge samt darauf entfallender Steuer automatisch ab (§ 14 Abs. 5 UStG) |
+| `get_billing_state` | Abrechnungsstand eines Angebots/einer AB (NONE/PARTIAL/FULL, abgerechnetes Promille, Summe der Abschläge) |
 
 ## 4. Was die KI **nicht** kaputt machen kann
 

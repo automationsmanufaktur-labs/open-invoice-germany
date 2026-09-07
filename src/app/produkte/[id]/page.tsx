@@ -1,13 +1,15 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
+import { getActiveOrg } from "@/lib/org";
 import { ProductForm } from "@/components/forms/ProductForm";
 
 export const dynamic = "force-dynamic";
 
 export default async function ProduktBearbeitenPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const product = await prisma.product.findUnique({ where: { id } });
+  const org = await getActiveOrg();
+  const product = await prisma.product.findFirst({ where: { id, orgId: org.id } });
   if (!product) notFound();
 
   return (

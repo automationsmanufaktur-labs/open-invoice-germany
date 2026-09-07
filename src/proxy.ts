@@ -4,17 +4,43 @@ import { SESSION_COOKIE, verifySessionToken } from "@/lib/auth/session";
 // Öffentlich erreichbar (ohne Anmeldung):
 const PUBLIC_EXACT = new Set(["/"]);
 // /api/cron ist nicht sessiongeschützt, sondern via CRON_SECRET in der Route.
-const PUBLIC_PREFIXES = ["/login", "/setup", "/api/auth", "/api/cron"];
+// /angebot/ (öffentliche Angebotsseite) und /api/public/ (öffentliche PDF-/Entscheidungs-
+// Aktionen, Phase 3b) sind bewusst die einzigen ohne-Login-Präfixe für Kundenzugriff —
+// keine weiteren hier ergänzen, ohne die Sicherheitsfolgen zu prüfen.
+const PUBLIC_PREFIXES = ["/login", "/setup", "/api/auth", "/api/cron", "/angebot/", "/api/public/"];
+
+// Präfixe, deren Seiten ohne interne Navigation/Layout ausgeliefert werden (Root-Layout
+// liest diesen Request-Header und rendert dann nur eine schlanke Hülle — kein Route-Group-
+// Umbau nötig, siehe Task-3-Addendum).
+const NO_NAV_PREFIXES = ["/angebot/", "/api/public/"];
+export const PUBLIC_NO_NAV_HEADER = "x-oig-public";
 
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  if (PUBLIC_EXACT.has(pathname) || PUBLIC_PREFIXES.some((p) => pathname.startsWith(p))) {
-    return NextResponse.next();
+  // G1: der Client-Header wird bei JEDER Anfrage zuerst entfernt — ohne diesen Schritt
+  // koennte ein Client ihn selbst setzen und sich damit als "oeffentliche, navigationslose"
+  // Anfrage ausgeben (z. B. um das schlanke Layout ohne interne Navigation zu erzwingen).
+  // Erst danach wird er fuer NO_NAV_PREFIXES wieder gesetzt.
+  const headers = new Headers(req.headers);
+  headers.delete(PUBLIC_NO_NAV_HEADER);
+
+  const isPublic = PUBLIC_EXACT.has(pathname) || PUBLIC_PREFIXES.some((p) => pathname.startsWith(p));
+
+  if (isPublic) {
+    if (NO_NAV_PREFIXES.some((p) => pathname.startsWith(p))) {
+      headers.set(PUBLIC_NO_NAV_HEADER, "1");
+      const res = NextResponse.next({ request: { headers } });
+      // G3: /angebot/ und /api/public/ liefern personenbezogene Angebotsdaten ohne Login
+      // — CDN/Browser duerfen sie nicht zwischenspeichern.
+      res.headers.set("cache-control", "private, no-store");
+      return res;
+    }
+    return NextResponse.next({ request: { headers } });
   }
 
   const userId = await verifySessionToken(req.cookies.get(SESSION_COOKIE)?.value);
-  if (userId) return NextResponse.next();
+  if (userId) return NextResponse.next({ request: { headers } });
 
   if (pathname.startsWith("/api/")) {
     return NextResponse.json({ error: "Nicht angemeldet" }, { status: 401 });
@@ -25,6 +51,9 @@ export async function proxy(req: NextRequest) {
   url.searchParams.set("from", pathname);
   return NextResponse.redirect(url);
 }
+
+// Fuer Unit-Tests exportiert (Test in test/unit/proxy-public.test.ts).
+export { PUBLIC_PREFIXES };
 
 export const config = {
   // Alles außer Next-Interna und statischen Assets.

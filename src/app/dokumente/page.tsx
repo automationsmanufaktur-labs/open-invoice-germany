@@ -1,6 +1,9 @@
 import Link from "next/link";
-import { prisma } from "@/lib/db";
+import { getActiveOrg } from "@/lib/org";
+import { dbInternal } from "@/lib/db";
 import { formatCents } from "@/lib/money";
+import { effectiveQuoteStatus } from "@/domain/document/status";
+import { StatusBadge } from "@/components/StatusBadge";
 
 export const dynamic = "force-dynamic";
 
@@ -10,8 +13,13 @@ const KIND_LABEL: Record<string, string> = {
   PROFORMA: "Proforma",
 };
 
-export default async function DokumentePage() {
-  const docs = await prisma.quote.findMany({
+export default async function DokumentePage({ searchParams }: { searchParams: Promise<{ archiviert?: string }> }) {
+  const { archiviert } = await searchParams;
+  const showArchived = archiviert === "1";
+  const org = await getActiveOrg();
+
+  const docs = await dbInternal.quote.findMany({
+    where: { orgId: org.id, ...(showArchived ? {} : { archivedAt: null }) },
     include: { customer: { select: { name: true } } },
     orderBy: { createdAt: "desc" },
   });
@@ -24,7 +32,12 @@ export default async function DokumentePage() {
           Neues Dokument
         </Link>
       </div>
-      <p className="text-sm text-slate-500">Angebote, Auftragsbestätigungen und Proforma-Rechnungen — keine Steuerbelege; jederzeit in eine Rechnung umwandelbar.</p>
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-slate-500">Angebote, Auftragsbestätigungen und Proforma-Rechnungen — keine Steuerbelege; jederzeit in eine Rechnung umwandelbar.</p>
+        <Link href={showArchived ? "/dokumente" : "/dokumente?archiviert=1"} className="text-sm font-medium text-indigo-600 hover:underline">
+          {showArchived ? "Archivierte ausblenden" : "Archivierte anzeigen"}
+        </Link>
+      </div>
 
       {docs.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-300 bg-white p-10 text-center text-slate-500">
@@ -47,7 +60,7 @@ export default async function DokumentePage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {docs.map((d) => (
-                <tr key={d.id} className="hover:bg-slate-50">
+                <tr key={d.id} className={`hover:bg-slate-50 ${d.archivedAt ? "opacity-60" : ""}`}>
                   <td className="px-4 py-3">
                     <Link href={`/dokumente/${d.id}`} className="font-medium text-indigo-600 hover:underline">
                       {d.number ?? "—"}
@@ -55,7 +68,10 @@ export default async function DokumentePage() {
                   </td>
                   <td className="px-4 py-3 text-slate-600">{KIND_LABEL[d.kind] ?? d.kind}</td>
                   <td className="px-4 py-3 text-slate-600">{d.customer.name}</td>
-                  <td className="px-4 py-3 text-slate-500">{d.status === "CONVERTED" ? "in Rechnung umgewandelt" : "offen"}</td>
+                  <td className="px-4 py-3">
+                    <StatusBadge status={effectiveQuoteStatus({ status: d.status, validUntil: d.validUntil })} />
+                    {d.archivedAt && <span className="ml-2 text-xs text-slate-400">archiviert</span>}
+                  </td>
                   <td className="tabular px-4 py-3 text-right font-medium">{formatCents(d.grossTotalCents, d.currency)}</td>
                 </tr>
               ))}

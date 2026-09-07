@@ -32,9 +32,10 @@
 11. [Storno/Korrektur/Gutschrift + § 14c + Skonto](#11-stornokorrekturgutschrift--14c--skonto-in-e-rechnung)
 12. [Mahnwesen (Verzug, Verzugszinsen, Mahngebühren)](#12-mahnwesen--286-verzug--288-verzugszinsen-mahngebühren)
 13. [DSGVO für Rechnungsdaten + E-Rechnung-Tooling](#13-dsgvo-für-rechnungsdaten--e-rechnung-tooling)
-14. [UMSETZUNGS-MATRIX (Software-Pflichten)](#14-umsetzungs-matrix--software-pflichten)
-15. [Offene rechtliche Fragen (mit Steuerberater klären)](#15-offene-rechtliche-fragen--vor-produktivnutzung-mit-steuerberater-klären)
-16. [Quellenverzeichnis](#16-quellenverzeichnis)
+14. [Abschlags- und Schlussrechnungen (§ 14 Abs. 5 UStG)](#14-abschlags--und-schlussrechnungen--14-abs-5-ustg)
+15. [UMSETZUNGS-MATRIX (Software-Pflichten)](#15-umsetzungs-matrix--software-pflichten)
+16. [Offene rechtliche Fragen (mit Steuerberater klären)](#16-offene-rechtliche-fragen--vor-produktivnutzung-mit-steuerberater-klären)
+17. [Quellenverzeichnis](#17-quellenverzeichnis)
 
 ---
 
@@ -208,10 +209,18 @@ Für EU-weite Inanspruchnahme der Befreiung in anderen Mitgliedstaaten (besonder
 | BT-2 | Ausstellungsdatum | § 14 Abs. 4 Nr. 3 |
 | BT-9 | Fälligkeitsdatum | (Mahnwesen) |
 | BT-10 | **Buyer reference** (= Leitweg-ID im B2G; im B2B i.d.R. leer) | § 5 ERechV (B2G) |
+| BT-13 | Referenz der Bestellung (Bestellnummer, Phase 4b) | § 14 Abs. 4 Nr. 5 (Leistungsbeschreibung/Bezug) |
 | BT-20 | Payment terms (Zahlungs-/Skontobedingungen, Freitext) | § 14 Abs. 4 Nr. 7 |
+| BT-154 | Freitext-Detailbeschreibung der Position (Rich-Text als Klartext, Phase 4b) | § 14 Abs. 4 Nr. 5 |
+| BT-155 | Artikelnummer der Position (Phase 4b) | § 14 Abs. 4 Nr. 5 |
 | BG-23 / BT-118, BT-119 | VAT category code + rate | § 14 Abs. 4 Nr. 8 |
 | BT-121 | VAT category code (z.B. „AE" Reverse charge, „E" steuerbefreit) | § 14a |
 | BG-25 / BT-129, BT-153 | Menge / Art der Leistung | § 14 Abs. 4 Nr. 5 |
+| BG-27 / BT-136, BT-140 | Rabatt auf Zeilenebene (`AllowanceCharge`, Positionsrabatt) | § 14 Abs. 4 Nr. 7 (Entgeltminderung) |
+| BG-28 / BT-141, BT-145 | Aufschlag auf Zeilenebene (`AllowanceCharge`) | § 14 Abs. 4 Nr. 7 |
+| BG-20 / BT-92, BT-93, BT-96 | Rabatt auf Dokumentebene (`AllowanceCharge`, Belegrabatt) | § 14 Abs. 4 Nr. 7 |
+| BG-21 / BT-99, BT-100, BT-103 | Aufschlag auf Dokumentebene (`AllowanceCharge`, Belegaufschlag) | § 14 Abs. 4 Nr. 7 |
+| BT-107, BT-108 | Summe Zeilenrabatte / Summe Zeilenaufschläge (Netto-Summenfelder) | Rechenprobe EN 16931 |
 
 > **[ungesichert]** Das konkrete Mapping der Reverse-Charge-/§-25a-/Steuerbefreiungs-Hinweise auf EN-16931-VAT-Category-Codes und Begründungstexte (BT-120/BT-121) ist gegen die aktuelle KoSIT/XRechnung-Spezifikation zu prüfen — nicht primärquellen-verifiziert.
 
@@ -548,6 +557,7 @@ Bei OSS-Teilnahme **entfällt** die Rechnungsausstellungspflicht für die betrof
 - § 14 Abs. 4 S. 1 Nr. 7 verlangt **jede im Voraus vereinbarte Entgeltminderung**. Bei Skonto genügt eine **Freitext-Angabe** wie „2 % Skonto bei Zahlung bis …". Das Skonto muss **NICHT betragsmäßig** ausgewiesen werden (BMF 15.10.2025, Abschn. 14.5 Abs. 19 S. 11–12).
 - **Spätere Zahlung unter Skontoausnutzung** = Änderung der Bemessungsgrundlage nach § 17 UStG → **keine** Rechnungsberichtigung (§ 31 Abs. 5) nötig; Belegaustausch nur in § 17 Abs. 4-Fällen, Beleg muss keine USt-Rechnung sein.
 - EN 16931: Skonto/Zahlungsbedingungen im Freitextfeld **BT-20**. **[ungesichert]** Eine strukturierte KoSIT-Konvention (`SKONTO TAGE=n PROZENT=n`) ist eine **technische Empfehlung zur Auswertbarkeit, KEINE umsatzsteuerliche Pflicht** — vor Produktiveinsatz gegen aktuelle KoSIT/XRechnung-Spezifikation testen.
+- **Umsetzung dieser Software** (`src/lib/pricing/skonto.ts`, `src/lib/einvoice/mapper.ts`): Für bis zu zwei Skontoziele wird je Ziel eine Zeile `#SKONTO#TAGE=n#PROZENT=x.xx#` vor dem menschenlesbaren Zahlungsbedingungstext in BT-20 eingefügt (UBL **und** CII, `PaymentTerms`/`SpecifiedTradePaymentTerms`); der Betrag selbst wird **nicht** ausgewiesen, nur Frist und Prozentsatz — genügt der o.g. Freitext-Anforderung. Quelle für die Tag-Syntax: **XRechnung-Spezifikation 3.0.2 (KoSIT)**, Abschnitt „Zahlungsbedingungen"/BT-20 (`validator-configuration-xrechnung_3.0.2_2024-06-20`, s. `scripts/validate-erechnung.ts`); die Syntax ist — wie oben vermerkt — eine Auswertungs-Konvention, keine Schematron-Pflichtregel, und wird daher parallel zur Kernvalidierung (`npm run validate:erechnung`) gegen die offiziellen EN-16931-/XRechnung-CIUS-Schematron-Regeln getestet (13 Fixtures, u. a. `skonto-two-terms`). Fremdwährungs-Skonto (BT-20 nur in Rechnungswährung) ist **nicht** abgebildet.
 
 ### § 17-Fälle ohne Berichtigungspflicht (BMF Rn. 51a)
 
@@ -635,7 +645,37 @@ Skonti · Nachlässe wegen Mängelrügen **ohne** Auswirkung auf die abgerechnet
 
 ---
 
-## 14. UMSETZUNGS-MATRIX — Software-Pflichten
+## 14. Abschlags- und Schlussrechnungen (§ 14 Abs. 5 UStG)
+
+**Kurzregel:** Anzahlungen (Abschlagsrechnungen) lösen die Steuer bereits bei **Vereinnahmung** aus (nicht erst bei Leistungserbringung); die abschließende **Schlussrechnung über die Gesamtleistung** muss die bereits abgerechneten Anzahlungen **und die darauf entfallende Steuer offen absetzen**, sonst droht ein doppelter Steuerausweis.
+
+### Rechtsgrundlagen
+
+| Norm | Regel |
+|------|-------|
+| § 13 Abs. 1 Nr. 1 Buchst. a Satz 4 UStG | Wird ein Entgelt (oder Teilentgelt) **vor** Ausführung der Leistung vereinnahmt, entsteht die Steuer dafür bereits mit Ablauf des Voranmeldungszeitraums der Vereinnahmung — unabhängig vom späteren Leistungszeitpunkt der Schlussrechnung. |
+| § 14 Abs. 5 Satz 1 UStG | Wird vor Ausführung der Leistung eine Rechnung über die (Teil-)Zahlung erteilt, gilt § 14 Abs. 4 UStG sinngemäß (Abschlagsrechnung ist selbst eine vollwertige Rechnung mit allen Pflichtangaben). |
+| § 14 Abs. 5 Satz 2 UStG | In der **Endrechnung über die Gesamtleistung** sind die vor Ausführung der Leistung **vereinnahmten Teilentgelte und die hierauf entfallenden Steuerbeträge abzusetzen**, soweit über sie Rechnungen mit gesondertem Steuerausweis erteilt wurden. |
+| Abschn. 14.8 UStAE | Verwaltungsauffassung zu § 14 Abs. 5 UStG: konkretisiert Form/Inhalt der Absetzung in der Endrechnung (Bezeichnung der Anzahlungsrechnungen nach Datum und Betrag) und die Folgen einer fehlerhaften/unterlassenen Absetzung (Gefährdung nach § 14c Abs. 1 UStG bei zu hohem Steuerausweis in der Endrechnung). |
+
+### Umsetzung in dieser Software
+
+- **Drei Rechnungstypen, alle GoBD-Rechnungen** (Entwurf → `finalizeWithinTx` → Storno/Gutschrift wie jede andere Rechnung): `PARTIAL` (Teilrechnung über eine Teilleistung — Leistung ist bereits erbracht, keine Anzahlungsbesteuerung), `DOWNPAYMENT` (Abschlagsrechnung vor Leistungserbringung — löst § 13 Abs. 1 Nr. 1 Buchst. a Satz 4 UStG aus), `FINAL` (Schlussrechnung über die Gesamtleistung mit Absetzung).
+- **Abzugs-Snapshot (`FinalInvoiceDeduction`):** beim Festschreiben einer Schlussrechnung werden alle festgeschriebenen, nicht stornierten Abschlagsrechnungen der Quelle geladen, ihre Netto-/Steuerbeträge je Steuersatz in unveränderlichen `FinalInvoiceDeduction`-Zeilen gesichert (`number`/`issueDate` der jeweiligen Abschlagsrechnung — die von Abschn. 14.8 UStAE geforderte Bezeichnung nach Datum und Betrag) und `prepaidCents`/`payableCents` auf der Schlussrechnung gesetzt. Ein zu hoher Abzug (Summe der Abschläge > Gesamtleistung) wird beim Festschreiben mit Fehler abgelehnt statt einen negativen Restbetrag zuzulassen.
+- **E-Rechnung (EN 16931 / KoSIT-Empfehlung „Schlussrechnung"):** `DOWNPAYMENT` → `InvoiceTypeCode`/`TypeCode` **386** (UNTDID 1001 „**Prepayment invoice**" — Anzahlungsrechnung; korrigiert in der Fix-Welle nach dem Abschluss-Review, B10: zuvor fälschlich als „Partial invoice" bezeichnet, das ist Code **326**); `PARTIAL`/`FINAL` bleiben **380**. `PARTIAL` nutzt bewusst 380 statt des an sich passenderen 326 („Partial invoice"): 326 ist im XRechnung-/KoSIT-Umfeld unüblich und wird von Pruef-/Buchhaltungssoftware selten unterstützt, während 380 mit einem erläuternden Freitext (Beschreibung „Teilleistung … zu <Quelle Nr.>") ausreicht, um die Teilrechnung eindeutig zu kennzeichnen. Auf der Schlussrechnung: **BT-113** (Paid amount) = Σ Abschläge **brutto** aus dem Snapshot (nicht die tatsächlich geleisteten Zahlungen — das ist die von der KoSIT-Empfehlung vorgegebene Lesart von „Prepaid amount" bei Abschlagsrechnungen; Zahlungen, die NACH der Festschreibung der Schlussrechnung eingehen, ändern BT-113 nicht mehr, weil die XML zum Festschreibungszeitpunkt erzeugt wird — praktisch unschädlich, aber siehe `src/lib/einvoice/mapper.ts`), **BT-115** (Amount due for payment) = Restbetrag, **BG-3** (`cac:BillingReference`/`ram:InvoiceReferencedDocument`) je Abschlagsrechnung mit BT-25 (Nummer) und BT-26 (Datum), zusätzlich ein **BT-22**-Freitext mit der Abzugsaufstellung (Netto/USt je Abschlag). **EN 16931 BR-CO-16** (Payable amount = Tax inclusive amount − Paid amount, ggf. + Rundungsbetrag) ist dadurch automatisch erfüllt, weil `payableCents = grossTotalCents − paidCents` als einzige Formel für alle Rechnungstypen gilt.
+- **PDF-Abschlagsrechnung:** Pflichthinweis „Anzahlung, Steuer wird mit Vereinnahmung geschuldet (§ 13 Abs. 1 Nr. 1 Buchst. a Satz 4 UStG)."
+- **PDF-Schlussrechnung:** Summenblock zeigt „Gesamtleistung netto/brutto", je Abzug eine Zeile „abzüglich Abschlagsrechnung … − x,xx € (enthaltene USt y,yy €)", danach fett den Restbetrag — spiegelt Abschn. 14.8 UStAE unmittelbar auf dem Beleg.
+
+### Grenzen dieser Umsetzung
+
+Siehe `docs/LIMITATIONEN.md` — insbesondere: kein Mischen von Teil- und Abschlagsrechnungen auf derselben Quelle, Storno einer Abschlagsrechnung nach bereits festgeschriebener Schlussrechnung erfordert manuelles Nacharbeiten (keine automatische Korrektur der Schlussrechnung), Skonto wirkt nur auf den Restbetrag der Schlussrechnung.
+
+**Quellen:** [§ 13 Abs. 1 Nr. 1 Buchst. a UStG](https://www.gesetze-im-internet.de/ustg_1980/__13.html) · [§ 14 Abs. 5 UStG](https://www.gesetze-im-internet.de/ustg_1980/__14.html) · [Abschn. 14.8 UStAE (NWB-Datenbank)](https://datenbank.nwb.de/Dokument/378652_14___5/) · [xeinkauf.de — XRechnung FAQ](https://xeinkauf.de/xrechnung/) · [ZUGFeRD-Spezifikation — Schlussrechnung/KoSIT-Empfehlung](https://www.ferd-net.de/zugferd/)
+**Stand:** 2026-09-04
+
+---
+
+## 15. UMSETZUNGS-MATRIX — Software-Pflichten
 
 | Anforderung | Konkrete Software-Pflicht (Feld / Validierung / Sperre / Default) | MVP / Später |
 |-------------|---------------------------------------------------------------------|--------------|
@@ -656,7 +696,8 @@ Skonti · Nachlässe wegen Mängelrügen **ohne** Auswirkung auf die abgerechnet
 | E-Rechnung empfangen | Empfangskanal (E-Mail-Postfach + XML-Parser); Pflicht seit 1.1.2025 | **MVP** |
 | Hybrid-E-Rechnung | strukturierter XML-Teil **führend**; bei Abweichung XML maßgebend; Bildteil nur bei steuerlich relevanter Abweichung archivieren | **Später** |
 | Leitweg-ID (B2G) | BT-10-Feld; **Mod-97-10-Prüfziffer-Validierung**; vom Auftraggeber übernommen (nicht generiert); im B2B leer | **Später** (nur bei B2G) |
-| Skonto in E-Rechnung | Freitext BT-20 „X % Skonto bei Zahlung bis …"; **kein** betragsmäßiger Ausweis nötig; spätere Skonto-Zahlung = § 17, **keine** Korrekturrechnung | **MVP** |
+| Skonto in E-Rechnung | Freitext BT-20 „X % Skonto bei Zahlung bis …" + strukturierte `#SKONTO#TAGE=n#PROZENT=x.xx#`-Zeile je Ziel (bis zu zwei Ziele); **kein** betragsmäßiger Ausweis nötig; spätere Skonto-Zahlung = § 17, **keine** Korrekturrechnung | **MVP** |
+| Rabatt/Aufschlag in E-Rechnung | `AllowanceCharge` je Position (BG-27/28) und je Steuersatz auf Dokumentebene (BG-20/21, Largest-Remainder-Aufteilung); vorzeichen-invariant für Storno/Gutschrift; BT-107/108-Summenfelder | **MVP** |
 | Storno/Korrektur | eindeutiger Bezug zur Ursprungsrechnung (Datum + Nr.); bei E-Rechnung **als E-Rechnung** im Storno-/Korrektur-Rechnungstyp (PDF/Papier **gesperrt**) | **MVP** |
 | Gutschrift (echte, § 14 Abs. 2 S. 5) | „Gutschrift"-Kennzeichnung über Rechnungstyp; vorherige Vereinbarung; B2B-Inland E-Rechnung; Widerspruchs-Status | **Später** |
 | § 14c-Schutz | UI verhindert versehentlichen USt-Ausweis in RC-/§25a-/Kleinunternehmer-Belegen | **MVP** |
@@ -670,7 +711,7 @@ Skonti · Nachlässe wegen Mängelrügen **ohne** Auswirkung auf die abgerechnet
 
 ---
 
-## 15. Offene rechtliche Fragen — vor Produktivnutzung mit Steuerberater klären
+## 16. Offene rechtliche Fragen — vor Produktivnutzung mit Steuerberater klären
 
 1. **Geschäftsmodell B2B vs. B2C?** Davon hängt ab, ob XRechnung/ZUGFeRD-Erzeugung überhaupt implementiert werden muss (E-Rechnungspflicht nur B2B).
 2. **Vorjahresumsatz über/unter 800.000 €?** Bestimmt, ob die Ausstellungspflicht ab 1.1.2027 oder erst 1.1.2028 greift.
@@ -688,7 +729,7 @@ Skonti · Nachlässe wegen Mängelrügen **ohne** Auswirkung auf die abgerechnet
 
 ---
 
-## 16. Quellenverzeichnis
+## 17. Quellenverzeichnis
 
 ### Gesetze (gesetze-im-internet.de / dejure.org)
 
@@ -696,6 +737,7 @@ Skonti · Nachlässe wegen Mängelrügen **ohne** Auswirkung auf die abgerechnet
 - § 3c UStG — https://www.gesetze-im-internet.de/ustg_1980/__3c.html
 - § 4 UStG — https://www.gesetze-im-internet.de/ustg_1980/__4.html
 - § 6a UStG — https://www.gesetze-im-internet.de/ustg_1980/__6a.html
+- § 13 UStG — https://www.gesetze-im-internet.de/ustg_1980/__13.html
 - § 13b UStG — https://www.gesetze-im-internet.de/ustg_1980/__13b.html
 - § 14 UStG — https://www.gesetze-im-internet.de/ustg_1980/__14.html
 - § 14 UStG (dejure, konsolidiert) — https://dejure.org/gesetze/UStG/14.html
@@ -773,6 +815,8 @@ Skonti · Nachlässe wegen Mängelrügen **ohne** Auswirkung auf die abgerechnet
 - dr-datenschutz — Löschpflicht & Verjährungsfristen — https://www.dr-datenschutz.de/loeschpflicht-und-verjaehrungsfristen/
 - LKC — EuGH 40-€-Verzugspauschale — https://lkc.de/eugh-schafft-klarheit-zur-40-euro-verzugspauschale/
 - Finanztip — Mahngebühren — https://www.finanztip.de/mahngebuehren/
+- xeinkauf.de — XRechnung FAQ (Abschlags-/Schlussrechnung, BT-113/BG-3) — https://xeinkauf.de/xrechnung/
+- ZUGFeRD-Spezifikation / KoSIT-Empfehlung „Schlussrechnung" — https://www.ferd-net.de/zugferd/
 
 ### Tooling (außerhalb des primärquellen-verifizierten Rechts-Scopes)
 

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
+import { getActiveOrg } from "@/lib/org";
 import { formatCents, formatQuantity } from "@/lib/money";
 import { intervalLabel } from "@/lib/recurring";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -20,8 +21,9 @@ function deDate(d: Date | null) {
 
 export default async function AboDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const rec = await prisma.recurringInvoice.findUnique({
-    where: { id },
+  const org = await getActiveOrg();
+  const rec = await prisma.recurringInvoice.findFirst({
+    where: { id, orgId: org.id },
     include: {
       customer: true,
       lines: { orderBy: { position: "asc" } },

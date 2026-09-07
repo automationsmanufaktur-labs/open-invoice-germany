@@ -53,6 +53,25 @@ async function guardInvoiceWhere(where: unknown): Promise<void> {
   if (locked) throw new GobdImmutabilityError(locked.number ?? locked.id);
 }
 
+/**
+ * B9 (Fix-Welle): `FinalInvoiceDeduction` ist der Abzugs-Snapshot einer Schlussrechnung
+ * (Abschn. 14.8 UStAE) — genauso unveraenderlich wie die Rechnung/Zeilen selbst, aber
+ * bisher ohne Guard (anders als `invoice`/`invoiceLine`). Anders als dort gibt es keinen
+ * DRAFT-Status, ueber den eine Aenderung je legitim waere: die Zeilen werden
+ * ausschliesslich einmalig innerhalb von `finalizeWithinTx` per `createMany` auf dem
+ * ungeschuetzten `dbInternal`/Transaktions-Client geschrieben — ueber den geschuetzten
+ * `prisma`-Client sind update/delete/updateMany/deleteMany deshalb IMMER verboten.
+ */
+class FinalInvoiceDeductionImmutabilityError extends Error {
+  constructor() {
+    super(
+      "GoBD: FinalInvoiceDeduction ist ein unveraenderlicher Abzugs-Snapshot der Schlussrechnung " +
+        "und kann nicht nachtraeglich geaendert oder geloescht werden (Abschn. 14.8 UStAE).",
+    );
+    this.name = "FinalInvoiceDeductionImmutabilityError";
+  }
+}
+
 async function guardLineWhere(where: unknown): Promise<void> {
   const rows = await base.invoiceLine.findMany({
     where: (where ?? {}) as never,
@@ -102,6 +121,20 @@ export const prisma = base.$extends({
       async deleteMany({ args, query }) {
         await guardLineWhere(args.where);
         return query(args);
+      },
+    },
+    finalInvoiceDeduction: {
+      async update() {
+        throw new FinalInvoiceDeductionImmutabilityError();
+      },
+      async delete() {
+        throw new FinalInvoiceDeductionImmutabilityError();
+      },
+      async updateMany() {
+        throw new FinalInvoiceDeductionImmutabilityError();
+      },
+      async deleteMany() {
+        throw new FinalInvoiceDeductionImmutabilityError();
       },
     },
   },

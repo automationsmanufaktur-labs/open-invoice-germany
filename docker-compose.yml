@@ -31,8 +31,11 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: "postgresql://oig@db:5432/openinvoice?schema=public"
+      ATTACHMENTS_DIR: "/app/data/attachments"
       # E-Rechnung-Sidecar (optional, siehe unten):
       # EINVOICE_SERVICE_URL: "http://einvoice:8080"
+    volumes:
+      - oig-attachments:/app/data/attachments
     ports:
       - "3000:3000"
 
@@ -52,3 +55,4 @@ services:
 
 volumes:
   oig-db:
+  oig-attachments:
