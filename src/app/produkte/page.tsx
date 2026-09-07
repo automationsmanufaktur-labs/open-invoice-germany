@@ -1,11 +1,22 @@
 import Link from "next/link";
 import { prisma } from "@/lib/db";
+import { getActiveOrg } from "@/lib/org";
+import { ensureArticleNumbers } from "@/domain/numbering/ranges";
 import { formatCents } from "@/lib/money";
 import { archiveProduct } from "@/app/actions/masterdata";
 
 export const dynamic = "force-dynamic";
 
 export default async function ProduktePage() {
+  try {
+    const org = await getActiveOrg();
+    // Selbstheilung (Nit, Final-Review, analog Kundenliste): Bestandsprodukte ohne
+    // Artikelnummer bekommen beim ersten Laden der Liste eine — idempotent.
+    await ensureArticleNumbers(org.id);
+  } catch {
+    // Keine Organisation eingerichtet -> keine Produkte vorhanden, Liste bleibt leer.
+  }
+
   const products = await prisma.product.findMany({
     where: { isArchived: false },
     orderBy: { name: "asc" },

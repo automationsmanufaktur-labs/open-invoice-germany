@@ -45,7 +45,22 @@ function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export function NewRecurringForm({ customers, products }: { customers: CustomerOption[]; products: ProductOption[] }) {
+export function NewRecurringForm({
+  customers,
+  products,
+  defaultAutoFinalize = false,
+  defaultAutoSend = false,
+  defaultCurrency = "EUR",
+}: {
+  customers: CustomerOption[];
+  products: ProductOption[];
+  /** Vorbelegung aus DocumentSettings.recurringAutoFinalizeDefault (Phase 7, §33). */
+  defaultAutoFinalize?: boolean;
+  /** Vorbelegung aus DocumentSettings.recurringAutoSendDefault (Phase 7, §33). */
+  defaultAutoSend?: boolean;
+  /** Vorbelegung aus DocumentSettings.defaultCurrency. */
+  defaultCurrency?: string;
+}) {
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [customerId, setCustomerId] = useState(customers[0]?.id ?? "");
@@ -54,10 +69,11 @@ export function NewRecurringForm({ customers, products }: { customers: CustomerO
   const [startDate, setStartDate] = useState(todayISO());
   const [endDate, setEndDate] = useState("");
   const [paymentTermsDays, setPaymentTermsDays] = useState("14");
-  const [autoFinalize, setAutoFinalize] = useState(false);
+  const [autoFinalize, setAutoFinalize] = useState(defaultAutoFinalize);
+  const [autoSend, setAutoSend] = useState(defaultAutoSend);
   const [notes, setNotes] = useState("");
   const [scheme, setScheme] = useState("REGULAR");
-  const [currency, setCurrency] = useState("EUR");
+  const [currency, setCurrency] = useState(defaultCurrency);
   const [lines, setLines] = useState<LineState[]>([emptyLine()]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -91,8 +107,12 @@ export function NewRecurringForm({ customers, products }: { customers: CustomerO
       endDate: endDate || undefined,
       paymentTermsDays: Number(paymentTermsDays) || 14,
       autoFinalize,
+      autoSend,
       taxScheme: scheme,
-      currency: currency,
+      // S5 (Fix-Welle, Final-Review): keine hartcodierte Waehrung — der Selektor ist mit
+      // DocumentSettings.defaultCurrency vorbelegt; ohne Auswahl faellt createRecurring()
+      // weiterhin auf DocumentSettings.defaultCurrency (bzw. EUR) zurueck.
+      currency: currency || undefined,
       notes: finalNotes,
       lines: lines.map((l) => ({
         description: l.description,
@@ -172,8 +192,30 @@ export function NewRecurringForm({ customers, products }: { customers: CustomerO
           <input className={input} type="number" min={0} max={365} value={paymentTermsDays} onChange={(e) => setPaymentTermsDays(e.target.value)} />
         </label>
         <label className="flex cursor-pointer items-center gap-2 self-end rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
-          <input type="checkbox" checked={autoFinalize} onChange={(e) => setAutoFinalize(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={autoFinalize}
+            disabled={autoSend}
+            onChange={(e) => setAutoFinalize(e.target.checked)}
+          />
           <span className="text-slate-700">Rechnungen automatisch festschreiben (sofort GoBD-konform &amp; nummeriert)</span>
+        </label>
+        <label className="flex cursor-pointer items-center gap-2 self-end rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
+          <input
+            type="checkbox"
+            checked={autoSend}
+            onChange={(e) => {
+              const checked = e.target.checked;
+              setAutoSend(checked);
+              // S4 (Fix-Welle): Versand setzt Festschreibung voraus — sonst ginge eine
+              // Rechnung mit Nummer/GiroCode "ENTWURF" per E-Mail raus.
+              if (checked) setAutoFinalize(true);
+            }}
+          />
+          <span className="text-slate-700">
+            Rechnungen automatisch per E-Mail versenden
+            {autoSend && <span className="block text-xs text-slate-500">Versand setzt Festschreibung voraus.</span>}
+          </span>
         </label>
       </div>
 

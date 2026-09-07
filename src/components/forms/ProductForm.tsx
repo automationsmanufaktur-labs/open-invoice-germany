@@ -9,6 +9,7 @@ export interface ProductFormData {
   id: string;
   name: string;
   description: string | null;
+  articleNumber: string | null;
   unit: string;
   netPriceCents: number;
   taxRate: number;
@@ -26,6 +27,13 @@ export function ProductForm({ product }: { product?: ProductFormData | null }) {
       <div className="grid gap-4 rounded-lg border border-slate-200 bg-white p-5 sm:grid-cols-2">
         <TextField label="Bezeichnung" name="name" defaultValue={product?.name} required className="sm:col-span-2" />
         <TextAreaField label="Beschreibung" name="description" defaultValue={product?.description} className="sm:col-span-2" />
+        <TextField
+          label="Artikelnummer"
+          name="articleNumber"
+          defaultValue={product?.articleNumber}
+          placeholder="wird automatisch vergeben"
+          hint="Leer lassen für automatische Vergabe aus dem Nummernkreis."
+        />
         <TextField
           label="Einheit (UN/ECE)"
           name="unit"

@@ -12,11 +12,17 @@
  * fortgeschrieben (nicht von `now`), damit der Rhythmus stabil bleibt.
  */
 import { dbInternal } from "@/lib/db";
-import { computeLineNetCents } from "@/lib/money";
+import { computeLineNet } from "@/lib/pricing/line";
 import { computeTaxBreakdown } from "@/lib/tax";
 import { appendChangeLog } from "@/domain/audit";
+import { linkDocuments } from "@/domain/relations";
 import { finalizeWithinTx } from "@/domain/invoice/finalize";
 import { advanceDate, type RecurInterval } from "@/lib/recurring";
+import { loadDocumentSettings } from "@/domain/document/settings";
+import { formatDateDe } from "@/lib/template/format";
+import { prefillEmail } from "@/domain/email/compose";
+import { sendDocumentEmail } from "@/domain/email/send";
+import type { MailProvider } from "@/lib/mail/provider";
 import { RecurringError } from "./create";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -24,6 +30,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export interface RunOptions {
   now?: Date;
   actor?: string;
+  /** Provider-Injektion fuer Tests (Muster: `runDunningJob`) — Standard: echter SMTP-Versand. */
+  provider?: MailProvider;
 }
 
 export interface EmittedInvoice {
@@ -31,11 +39,59 @@ export interface EmittedInvoice {
   number: string | null;
   periodDate: Date;
   finalized: boolean;
+  /** Ergebnis des automatischen Versands (autoSend, Phase 7, §33) — fehlt, wenn autoSend aus ist. */
+  emailStatus?: "SENT" | "FAILED" | "SKIPPED";
+  emailError?: string;
+}
+
+/**
+ * Versendet die erzeugte Rechnung ueber die Standardvorlage INVOICE (autoSend, Phase 7,
+ * §33) — LAEUFT AUSSERHALB jeder Prisma-Transaktion (Modulkommentar: kein SMTP-Aufruf
+ * innerhalb einer Transaktion). Ohne Kunden-E-Mail oder Mailkonfiguration: SKIPPED statt
+ * eines geworfenen Fehlers — der Lauf der uebrigen Abos darf nicht abbrechen.
+ */
+async function sendRecurringInvoiceEmail(
+  orgId: string,
+  invoiceId: string,
+  provider: MailProvider | undefined,
+): Promise<{ status: "SENT" | "FAILED" | "SKIPPED"; error?: string }> {
+  try {
+    const pre = await prefillEmail(orgId, { docType: "INVOICE", docId: invoiceId });
+    if (pre.to.length === 0) return { status: "SKIPPED" };
+    const result = await sendDocumentEmail(
+      orgId,
+      "recurring-runner",
+      {
+        docType: "INVOICE",
+        docId: invoiceId,
+        to: pre.to.join(","),
+        cc: pre.cc.join(","),
+        bcc: pre.bcc.join(","),
+        subject: pre.subject,
+        body: pre.body,
+        signature: pre.signature,
+        copyToSelf: pre.copyToSelf,
+        standardAttachments: pre.defaultStandardAttachments,
+        templateId: pre.templateId,
+        warnings: pre.warnings,
+      },
+      [],
+      provider,
+    );
+    return result.status === "SENT" ? { status: "SENT" } : { status: "FAILED", error: result.error };
+  } catch (e) {
+    return { status: "FAILED", error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /** Erzeugt genau EINE Rechnung für die aktuelle Periode und schiebt das Abo weiter. */
-async function emitOne(recurringId: string, now: Date, actor: string): Promise<{ result: EmittedInvoice; ended: boolean }> {
-  return dbInternal.$transaction(async (tx) => {
+async function emitOne(
+  recurringId: string,
+  now: Date,
+  actor: string,
+  provider?: MailProvider,
+): Promise<{ result: EmittedInvoice; ended: boolean; autoSend: boolean; orgId: string }> {
+  const created = await dbInternal.$transaction(async (tx) => {
     const rec = await tx.recurringInvoice.findUnique({
       where: { id: recurringId },
       include: { lines: { orderBy: { position: "asc" } } },
@@ -55,11 +111,29 @@ async function emitOne(recurringId: string, now: Date, actor: string): Promise<{
       taxRate: l.taxRate,
       taxCategory: l.taxCategory,
       discountPermille: l.discountPermille,
-      lineNetCents: computeLineNetCents(l.quantityMilli, l.unitNetPriceCents, l.discountPermille),
+      // W4 — dieselbe Rundung wie bei der manuellen Rechnung (computeLineNet aus
+      // src/lib/pricing/line.ts): erst grossLineCents runden, dann den Prozentabzug
+      // runden, statt in einem Schritt (computeLineNetCents rundete abweichend).
+      lineNetCents: computeLineNet({
+        quantityMilli: l.quantityMilli,
+        unitNetPriceCents: l.unitNetPriceCents,
+        discountPermille: l.discountPermille,
+      }).lineNetCents,
     }));
     const totals = computeTaxBreakdown(
       lines.map((l) => ({ lineNetCents: l.lineNetCents, taxRate: l.taxRate, taxCategory: l.taxCategory })),
     );
+
+    // recurringInsertPeriodText (Phase 7, §33): Kopftext "Abrechnungszeitraum dd.mm.yyyy –
+    // dd.mm.yyyy", nur wenn die Org-Einstellung aktiv ist. Periodenstart = ein Intervall
+    // vor dem aktuellen Stichtag (negativer advanceDate-Aufruf, dieselbe Monats-/
+    // Wochenklemmung wie beim Vorwaertsschieben).
+    const docSettings = await loadDocumentSettings(rec.orgId);
+    let headerText: string | undefined;
+    if (docSettings.recurringInsertPeriodText) {
+      const periodStart = advanceDate(periodDate, rec.interval as RecurInterval, -rec.intervalCount, rec.anchorDay);
+      headerText = `Abrechnungszeitraum ${formatDateDe(periodStart)} – ${formatDateDe(periodDate)}`;
+    }
 
     const invoice = await tx.invoice.create({
       data: {
@@ -72,6 +146,7 @@ async function emitOne(recurringId: string, now: Date, actor: string): Promise<{
         deliveryDate: periodDate,
         dueDate: new Date(now.getTime() + rec.paymentTermsDays * DAY_MS),
         notes: rec.notes,
+        headerText,
         recurringInvoiceId: rec.id,
         netTotalCents: totals.netTotalCents,
         taxTotalCents: totals.taxTotalCents,
@@ -80,6 +155,8 @@ async function emitOne(recurringId: string, now: Date, actor: string): Promise<{
         lines: { create: lines },
       },
     });
+
+    await linkDocuments(tx, { orgId: rec.orgId, fromType: "INVOICE", fromId: invoice.id, toType: "RECURRING", toId: rec.id, relationType: "GENERATED_BY" });
 
     await appendChangeLog(tx, {
       orgId: rec.orgId,
@@ -111,15 +188,32 @@ async function emitOne(recurringId: string, now: Date, actor: string): Promise<{
       },
     });
 
-    return { result: { invoiceId: invoice.id, number, periodDate, finalized }, ended };
+    const result: EmittedInvoice = { invoiceId: invoice.id, number, periodDate, finalized };
+    return { result, ended, autoSend: rec.autoSend, orgId: rec.orgId };
   });
+
+  // autoSend (Phase 7, §33): erst NACH der Transaktion versenden (Modulkommentar: kein
+  // SMTP-Aufruf innerhalb einer Prisma-Transaktion). Ein Fehler beim Versand darf die
+  // bereits erzeugte/festgeschriebene Rechnung nicht rueckabwickeln — er landet im Feld
+  // `emailStatus`/`emailError` des Ergebnisses (Summary), niemals als geworfener Fehler.
+  // S4 (Fix-Welle, Final-Review): zusaetzlich zu `autoSend` MUSS die Rechnung tatsaechlich
+  // festgeschrieben sein (createRecurring erzwingt zwar autoFinalize bei autoSend, aber
+  // ein Bestandsdatensatz aus der Zeit vor diesem Fix koennte autoSend=true/autoFinalize=false
+  // noch kombiniert haben) — sonst ginge eine Rechnung mit Nummer/GiroCode "ENTWURF" raus.
+  if (created.autoSend && created.result.finalized) {
+    const sent = await sendRecurringInvoiceEmail(created.orgId, created.result.invoiceId, provider);
+    created.result.emailStatus = sent.status;
+    created.result.emailError = sent.error;
+  }
+
+  return created;
 }
 
 /** Manuell: erzeugt sofort die nächste fällige Rechnung eines Abos (ignoriert den Stichtag). */
 export async function emitRecurringNow(recurringId: string, opts: RunOptions = {}): Promise<EmittedInvoice> {
   const now = opts.now ?? new Date();
   const actor = opts.actor ?? "system";
-  const { result } = await emitOne(recurringId, now, actor);
+  const { result } = await emitOne(recurringId, now, actor, opts.provider);
   return result;
 }
 
@@ -155,7 +249,7 @@ export async function runDueRecurring(
         select: { status: true, nextRunDate: true },
       });
       if (!cur || cur.status !== "ACTIVE" || cur.nextRunDate > now) break;
-      const { result, ended } = await emitOne(rec.id, now, actor);
+      const { result, ended } = await emitOne(rec.id, now, actor, opts.provider);
       emitted.push(result);
       if (ended) break;
     }

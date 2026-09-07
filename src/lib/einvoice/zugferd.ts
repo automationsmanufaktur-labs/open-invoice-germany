@@ -8,6 +8,7 @@
  */
 import { PDFDocument, AFRelationship } from "pdf-lib";
 import { renderInvoicePdf } from "@/lib/pdf/invoice-pdf";
+import type { PdfTheme } from "@/lib/pdf/theme";
 import { buildFacturXCII } from "./cii";
 import type { EInvoiceData } from "./types";
 
@@ -22,8 +23,8 @@ export async function embedFacturX(pdfBytes: Uint8Array, ciiXml: string): Promis
   return pdfDoc.save({ useObjectStreams: false });
 }
 
-export async function renderZugferdPdf(data: EInvoiceData): Promise<Buffer> {
-  const pdf = await renderInvoicePdf(data);
+export async function renderZugferdPdf(data: EInvoiceData, theme: PdfTheme): Promise<Buffer> {
+  const pdf = await renderInvoicePdf(data, theme);
   const cii = buildFacturXCII(data);
   const hybrid = await embedFacturX(new Uint8Array(pdf), cii);
   return Buffer.from(hybrid);

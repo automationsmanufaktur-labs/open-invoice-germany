@@ -5,6 +5,7 @@
  */
 import { dbInternal } from "@/lib/db";
 import { normalizeToNoon } from "@/lib/recurring";
+import { loadDocumentSettings } from "@/domain/document/settings";
 import type { CreateRecurringInput } from "@/schemas";
 
 export class RecurringError extends Error {
@@ -22,6 +23,15 @@ export async function createRecurring(orgId: string, input: CreateRecurringInput
   // Stichtage auf 12:00 lokal ankern (DST-/Zeitzonen-sichere Tagesanzeige).
   const startDate = normalizeToNoon(input.startDate);
   const endDate = input.endDate ? normalizeToNoon(input.endDate) : null;
+
+  // recurringAutoFinalizeDefault/recurringAutoSendDefault (Phase 7, §33): greifen nur,
+  // wenn der Aufrufer die Felder nicht selbst gesetzt hat.
+  const docSettings = await loadDocumentSettings(orgId);
+  const autoSend = input.autoSend ?? docSettings.recurringAutoSendDefault;
+  // S4 (Fix-Welle, Final-Review): autoSend ohne autoFinalize versendete bisher eine
+  // Rechnung mit Nummer "ENTWURF" und GiroCode-Verwendungszweck "ENTWURF" an den Kunden.
+  // Versand setzt Festschreibung voraus — autoSend erzwingt autoFinalize.
+  const autoFinalize = autoSend ? true : (input.autoFinalize ?? docSettings.recurringAutoFinalizeDefault);
 
   const lines = input.lines.map((l, i) => ({
     position: i + 1,
@@ -47,9 +57,11 @@ export async function createRecurring(orgId: string, input: CreateRecurringInput
       nextRunDate: startDate,
       endDate,
       taxScheme: input.taxScheme,
-      currency: input.currency,
+      // defaultCurrency (Phase 7 Fix-Runde 1): ohne explizite Angabe DocumentSettings.defaultCurrency.
+      currency: input.currency ?? docSettings.defaultCurrency ?? "EUR",
       paymentTermsDays: input.paymentTermsDays,
-      autoFinalize: input.autoFinalize,
+      autoFinalize,
+      autoSend,
       notes: input.notes ?? null,
       lines: { create: lines },
     },

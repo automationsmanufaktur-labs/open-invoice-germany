@@ -40,12 +40,34 @@ npm run mcp   # MCP-Server (stdio) starten / in Claude Code via .mcp.json einbin
 - **Steuerschemata**: Regelbesteuerung (19/7/0), Kleinunternehmer (§ 19), Reverse Charge (§ 13b), ig. Lieferung, Differenzbesteuerung (§ 25a), Kleinbetrag (§ 33).
 - **E-Rechnung**: **XRechnung** (UBL, EN 16931) — Export inkl. EN-16931-Kernregel-Validierung. ZUGFeRD/Factur-X über Mustang-Sidecar (Docker).
 - **PDF-Export** ("sonstige Rechnung") mit allen Pflichtangaben.
+- **Positions-Editor**: Drag-and-Drop zum Umordnen, Positionen duplizieren, Überschriften/Textblöcke/berechnete Zwischensummen neben regulären Positionen (nur reguläre Positionen landen im E-Rechnung-XML), Rich-Text (eingeschränktes Markdown — fett/kursiv/unterstrichen, eine Listenebene, Links) in Positionsbeschreibungen, Artikelnummern sowie Kopffelder (Betreff, Bestellnummer, interne Referenz, Ansprechpartner, Liefer-/Rechnungsadresse).
+- **Beleganhänge**: Dateien an jeden Beleg (Rechnung, Angebot, Lieferschein, Mahnung, Abo) anhängen — 10 MB je Datei, 50 MB je Beleg, MIME-Whitelist + Magic-Bytes-Prüfung, hash-adressierte Ablage mit Dedup, auswählbar als Zusatzanhang beim Mailversand.
+- **Teil-, Abschlags- und Schlussrechnungen** (§ 14 Abs. 5 UStG): Teilrechnung über Prozent/Betrag/einzelne Positionen aus Angebot oder Lieferschein, Abschlagsrechnung vor Leistungserbringung (E-Rechnung-Typcode 386), abschließende Schlussrechnung, die die Abschläge samt Steuer automatisch absetzt (unveränderlicher Abzugs-Snapshot, BT-113/BT-115/BG-3 in der E-Rechnung, passender PDF-Abzugsblock).
+- **Briefpapier, Druckoptionen & Nummernkreise**: Briefpapier je Organisation (Logo, Farbe, Ränder, Absender-/Fußzeile) mit Live-Vorschau; zehn globale Druckschalter (Fußzeile, Seitenzahlen, Falz-/Lochmarken, welche Spalten erscheinen) mit Beleg-Override im Entwurf; neun konfigurierbare Nummernkreise (Angebote, Auftragsbestätigungen, Proforma, Lieferscheine, Rechnungen, Gutschriften, Mahnungen sowie Kunden-/Artikelnummern) mit Muster/Präfix/Reset und Rückdreh-Sperre.
+- **EPC-QR-Code („GiroCode")** auf Rechnungen — Scannen & Bezahlen in jeder Banking-App, aus denselben IBAN-/Betragsdaten der Rechnung erzeugt; entfällt ohne Fehler, wenn eine Voraussetzung fehlt (Fremdwährung, keine IBAN, kein offener Betrag).
 - **Self-hosted**: SQLite-Solo ohne Server **oder** PostgreSQL via Docker.
 - **Anmeldung**: eingebautes Admin-Konto (scrypt-Hash + signiertes Session-Cookie) — App und API geschützt.
 
 ### Status
 
-MVP. Was funktioniert: Stammdaten/Kunden/Produkte, Angebots-/Rechnungsmodell, Entwurf→Festschreiben→Storno, PDF- + XRechnung-Export, GoBD-Nummernkreis + Audit. Auf der Roadmap: Mahnwesen-UI, wiederkehrende Rechnungen, ZUGFeRD-Hybrid, DATEV-Export, B2G/Leitweg-ID, OSS/ZM, Multi-User. Siehe [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) (MVP / Stufe 2 / Stufe 3) und die ehrliche Liste der **[bekannten Einschränkungen](docs/LIMITATIONEN.md)**.
+MVP. Was funktioniert: Stammdaten/Kunden/Produkte, Angebots-/Rechnungsmodell, Entwurf→Festschreiben→Storno, Teilgutschriften, **stufen-getriebenes Mahnwesen mit eingebautem Scheduler (§ 288 BGB)**, **wiederkehrende Rechnungen/Abos**, PDF- + **XRechnung- + ZUGFeRD**-Export, GoBD-Nummernkreis + Audit. Auf der Roadmap: DATEV-Export, B2G/Leitweg-ID, OSS/ZM, Multi-User. Siehe [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) (MVP / Stufe 2 / Stufe 3) und die ehrliche Liste der **[bekannten Einschränkungen](docs/LIMITATIONEN.md)**.
+
+## Dokumentworkflow
+
+Angebot → Auftragsbestätigung → Lieferschein → Rechnung, alles verknüpft:
+
+1. **Angebot** anlegen (Entwurf, editierbar), versenden — Status `DRAFT → SENT`.
+2. Auf `ACCEPTED` setzen (oder direkt in eine **Auftragsbestätigung** umwandeln).
+3. In einen **Lieferschein** umwandeln (Mengen aus Angebot/AB, Überlieferung blockiert) und/oder in einen **Rechnungsentwurf**.
+4. Jede Umwandlung wird als Dokumentverknüpfung gespeichert; die **Dokumentkette** (auf jeder Angebots-/Rechnungs-/Lieferschein-Seite sichtbar) zeigt die volle Historie — Angebot → AB → Lieferschein → Rechnung → Zahlungen/Mahnungen.
+5. Der Abrechnungsstand (keine/teilweise/voll) wird aus diesen Verknüpfungen abgeleitet, nicht gespeichert.
+6. Statt (oder zusätzlich zu) einer vollen Rechnung: **Teilrechnung** (Prozent/Betrag/einzelne Positionen) oder **Abschlagsrechnung** aus Angebot/AB, danach **Schlussrechnung** — Abschläge samt Steuer werden automatisch abgesetzt (§ 14 Abs. 5 UStG).
+
+Dieselben Aktionen auch per MCP: `convert_document`, `create_delivery_note`, `set_document_status`, `duplicate_document`, `create_partial_invoice`, `create_downpayment_invoice`, `create_final_invoice`, `get_billing_state`. Details: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md), Einschränkungen: [docs/LIMITATIONEN.md](docs/LIMITATIONEN.md).
+
+### Angebot online annehmen lassen
+
+Auf der Angebots-Detailseite (`Dokumente → Angebot`) unter „Annahme-Link" einen Link erzeugen — die URL wird **einmalig** angezeigt (Kopieren-Button), danach nicht mehr abrufbar. Der Kunde öffnet den Link ohne Login, sieht Angebot + PDF-Download und kann annehmen oder ablehnen (Name Pflicht, E-Mail/Kommentar optional). Nach der Entscheidung: Status `ACCEPTED`/`REJECTED`, eine interne Benachrichtigungsmail, und je nach Einstellung (**Einstellungen → Dokumente**) automatisch eine Auftragsbestätigung oder ein Rechnungsentwurf. Der Link kann jederzeit widerrufen werden. Für den Platzhalter `{{offer.link}}` in der Angebots-Mailvorlage `APP_BASE_URL` setzen (`.env`) — sonst bleibt er leer.
 
 ## Tech-Stack
 
@@ -75,7 +97,68 @@ cp .env.example .env            # DATABASE_URL auf die postgresql://-Zeile umste
 docker compose up --build
 ```
 
-`docker-compose.yml` startet App + PostgreSQL + den **Mustang**-Sidecar (XRechnung-/ZUGFeRD-Erzeugung & -Validierung). Das Postgres-Schema liegt in `prisma/schema.postgres.prisma` (modellidentisch, nur andere Datasource).
+`docker-compose.yml` mountet ein benanntes Volume (`oig-attachments`) unter `/app/data/attachments` für Beleganhänge (`ATTACHMENTS_DIR`); beim Sichern zusammen mit `oig-db` mitnehmen.
+
+**Bestehende Instanz aktualisieren.** Wurde die Datenbank mit einer älteren Version
+per `prisma db push` angelegt, fehlt ihr die Migrationshistorie. Der Container
+startet dann nicht, sondern nennt den einmalig nötigen Befehl. Vorher ein Backup
+ziehen.
+
+**`migrate resolve` nicht blind ausfuehren.** Die Baseline `0_init` bildet den
+aktuellen Stand ab, inklusive `RecurringInvoice`, `RecurringInvoiceLine` und
+`Invoice.recurringInvoiceId`. Eine ältere Bestandsinstanz kennt diese Tabellen und
+Spalten unter Umständen nicht. Wird die Baseline ungeprüft als angewendet
+markiert, glaubt Prisma, das Schema sei vollständig, und spätere Abfragen
+scheitern mit `column ... does not exist`. Vorher prüfen:
+
+```bash
+docker compose run --rm app \
+  npx prisma migrate diff --from-url "$DATABASE_URL" \
+    --to-schema-datamodel prisma/schema.postgres.prisma --script
+```
+
+**Wichtig:** `--to-schema-datamodel` vergleicht gegen den aktuellen Modellstand
+(Head), nicht gegen die Baseline `0_init`. Referenz für den Baseline-Stand ist
+ausschließlich `prisma/migrations-postgres/0_init/migration.sql`. Der Diff kann
+daher auch Tabellen oder Spalten zeigen, die erst in einer **späteren**
+Migration unter `prisma/migrations-postgres/` eingeführt wurden (z. B. die
+Phase-0-Snapshot-Spalten) — diese gehören **nicht** von Hand eingespielt,
+sondern werden nach dem `resolve` automatisch von `migrate deploy` nachgezogen.
+Ob eine Spalte/Tabelle zur Baseline gehört, zeigt
+`grep -l "<spaltenname>" prisma/migrations-postgres/*/migration.sql`: taucht sie
+nur in `0_init` auf, gehört sie zur Baseline; taucht sie (auch) in einer
+späteren Migration auf, stammt sie von dort und wird nicht per Hand angelegt.
+
+- **Ausgabe leer** (nur der Kommentar "This is an empty migration"): die
+  Datenbank entspricht bereits der Baseline. `migrate resolve --applied 0_init`
+  unten ist sicher.
+- **Ausgabe enthält nur `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN` /
+  `CREATE INDEX` / `ALTER TABLE … ADD CONSTRAINT` (Fremdschlüssel)**: nur die
+  Anweisungen einspielen, die zu `0_init` gehören (siehe `grep`-Regel oben);
+  Anweisungen zu Spalten/Tabellen aus späteren Migrationen weglassen. Geprüftes
+  SQL mit `docker compose run --rm app npx prisma db execute --url
+  "$DATABASE_URL" --stdin` einspielen, danach mit `migrate resolve` fortfahren.
+- **Ausgabe enthält irgendein `DROP`**: abbrechen. Nicht anwenden, kein
+  `migrate resolve` ausführen. Die Datenbank enthält Daten, die die Baseline
+  nicht kennt — vorher Rücksprache halten.
+
+Ist der Diff sauber (oder wurde eingespielt):
+
+```bash
+docker compose run --rm app \
+  npx prisma migrate resolve --config prisma.postgres.config.ts --applied 0_init
+```
+
+Danach startet der Container normal; künftige Schemaänderungen laufen über
+`prisma migrate deploy`.
+
+**Ist ein Migrationseintrag in `_prisma_migrations` als fehlgeschlagen markiert**,
+verweigert `migrate deploy` die Ausführung und der Container startet nicht. Das
+ist gewollt (fail-closed) statt bei unsicherem Schemazustand einfach
+weiterzulaufen. Prüfen, was die Migration teilweise angerichtet hat, dann mit
+`prisma migrate resolve --rolled-back <name>` auflösen.
+
+`docker-compose.yml` startet App + PostgreSQL. Der **Mustang**-Sidecar (XRechnung-/ZUGFeRD-Erzeugung & -Validierung) ist ein optionaler, auskommentierter Block (`einvoice-service/` wird nicht mitgeliefert) — siehe Abschnitt oben. Das Postgres-Schema liegt in `prisma/schema.postgres.prisma` (modellidentisch, nur andere Datasource).
 
 ## Tests
 

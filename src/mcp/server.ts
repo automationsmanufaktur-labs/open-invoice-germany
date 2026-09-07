@@ -19,6 +19,7 @@ import { z } from "zod";
 
 import { dbInternal } from "@/lib/db";
 import { getActiveOrg } from "@/lib/org";
+import { ensureOrgMasterdata } from "@/domain/masterdata/ensure";
 import { roundHalfUp, formatCents } from "@/lib/money";
 import { defaultCategoryForScheme } from "@/lib/tax";
 import { SCHEME_NOTICE } from "@/domain/invoice/mandatory";
@@ -27,18 +28,72 @@ import { finalizeInvoice, FinalizeError } from "@/domain/invoice/finalize";
 import { cancelInvoice, CancelError } from "@/domain/invoice/cancel";
 import { createPartialCreditNote, CreditError } from "@/domain/invoice/credit";
 import { recordPayment, PaymentError } from "@/domain/invoice/payment";
+import { listPaymentMethods } from "@/domain/payment-method/manage";
 import { createDunning, DunningError } from "@/domain/dunning/create";
+import { sendDunning } from "@/domain/dunning/send";
+import { setDunningState } from "@/domain/dunning/state";
+import { loadDunningOverview } from "@/domain/dunning/overview";
+import { runScheduledJobs, type SchedulerJob } from "@/domain/scheduler/runner";
+import { MailNotConfiguredError } from "@/domain/email/settings";
 import { createRecurring, RecurringError } from "@/domain/recurring/create";
 import { emitRecurringNow, runDueRecurring } from "@/domain/recurring/run";
 import { intervalLabel } from "@/lib/recurring";
 import { createBusinessDocument } from "@/domain/document/create";
-import { convertDocumentToInvoice, ConvertError } from "@/domain/document/convert";
+import { convertDocument, ConvertError } from "@/domain/document/convert";
+import { createDeliveryNote, DeliveryNoteError } from "@/domain/delivery-note/create";
+import { setQuoteStatus, setDeliveryNoteStatus, setArchived, StatusTransitionError } from "@/domain/document/status";
+import { createShareLink, revokeShareLink, listShareLinks, ShareLinkError } from "@/domain/quote-share/link";
+import { loadDocumentSettings, saveDocumentSettings } from "@/domain/document/settings";
+import { loadPrintSettings, savePrintSettings, setPrintOptions } from "@/domain/settings/print";
+import { loadBrandingSettings, saveBrandingSettings } from "@/domain/settings/branding";
+import { listNumberRanges, updateNumberRange } from "@/domain/numbering/ranges";
+import { loadDunningSettings, saveDunningSettings } from "@/domain/dunning/settings";
+import { listDunningStages, updateDunningStage, DunningStageError } from "@/domain/dunning/stages";
+import { SecretsUnavailableError } from "@/lib/crypto/secrets";
+import { appBaseUrlFromEnv } from "@/lib/http/base-url";
+import { duplicateDocument, type DuplicatableType } from "@/domain/document/duplicate";
+import { createPartialInvoice, PartialInvoiceError } from "@/domain/invoice/partial";
+import { createDownpaymentInvoice, DownpaymentInvoiceError } from "@/domain/invoice/downpayment";
+import { createFinalInvoice, FinalInvoiceError } from "@/domain/invoice/final";
+import { assignCustomerNumber, assignArticleNumber } from "@/domain/numbering/ranges";
+import { billingStateFor } from "@/domain/document/billing-state";
+import { PricingError } from "@/lib/pricing/errors";
 import { loadEInvoiceData } from "@/lib/einvoice/load";
 import { buildXRechnungUBL } from "@/lib/einvoice/xrechnung";
 import { renderZugferdPdf } from "@/lib/einvoice/zugferd";
 import { validateXRechnung } from "@/lib/einvoice/en16931-core";
 import { renderInvoicePdf } from "@/lib/pdf/invoice-pdf";
-import { organizationSchema, customerSchema, createInvoiceSchema, createDocumentSchema, recordPaymentSchema, createRecurringSchema, TaxScheme } from "@/schemas";
+import { loadPdfTheme } from "@/domain/settings/theme";
+import {
+  organizationSchema,
+  customerSchema,
+  createInvoiceSchema,
+  createDocumentSchema,
+  recordPaymentSchema,
+  createRecurringSchema,
+  createDeliveryNoteSchema,
+  createPartialInvoiceSchema,
+  createDownpaymentInvoiceSchema,
+  createFinalInvoiceSchema,
+  documentStatusActionSchema,
+  convertDocumentBodySchema,
+  documentSettingsInputSchema,
+  printSettingsInputSchema,
+  printOptionsOverrideSchema,
+  brandingSettingsInputSchema,
+  NumberRangeDocType,
+  dunningSettingsInputSchema,
+  dunningStageFieldsSchema,
+  TaxScheme,
+  PaymentMethod,
+  DocRefType,
+  LineType,
+} from "@/schemas";
+import { NotFoundError } from "@/domain/errors";
+import { updateDraftInvoice, InvoiceUpdateError } from "@/domain/invoice/update";
+import { addAttachment, removeAttachment, listAttachments, type AttachmentDocType } from "@/domain/attachment/manage";
+import { AttachmentValidationError } from "@/lib/attachments/storage";
+import { MAX_ATTACHMENT_FILE_BYTES } from "@/lib/attachments/mime";
 
 // ── Helfer ────────────────────────────────────────────────────────────────
 type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -74,10 +129,31 @@ async function resolveCustomer(orgId: string, ref: string) {
   throw new Error(`Kein Kunde "${ref}" gefunden. Lege ihn zuerst mit upsert_customer an (Name + Anschrift).`);
 }
 
+async function resolvePaymentMethod(orgId: string, ref: string) {
+  const byCode = await dbInternal.paymentMethod.findFirst({ where: { orgId, code: ref.trim().toUpperCase() } });
+  if (byCode) return byCode;
+  const all = await dbInternal.paymentMethod.findMany({ where: { orgId } });
+  const lower = ref.trim().toLowerCase();
+  const match = all.find((m) => m.name.toLowerCase() === lower);
+  if (match) return match;
+  throw new Error(`Keine Zahlungsmethode "${ref}" gefunden. Mit list_payment_methods die verfügbaren Codes/Namen anzeigen.`);
+}
+
 async function resolveInvoice(orgId: string, ref: string) {
   const inv = await dbInternal.invoice.findFirst({ where: { orgId, OR: [{ id: ref }, { number: ref }] } });
   if (!inv) throw new Error(`Keine Rechnung "${ref}" gefunden (weder als ID noch als Nummer).`);
   return inv;
+}
+
+async function resolveDunning(orgId: string, ref: string) {
+  // Nit (Fix-Welle): explizites select statt vollem Row-Load — der einzige Aufrufer
+  // (send_dunning) braucht nur id/number.
+  const d = await dbInternal.dunning.findFirst({
+    where: { invoice: { orgId }, OR: [{ id: ref }, { number: ref }] },
+    select: { id: true, number: true },
+  });
+  if (!d) throw new Error(`Keine Mahnung "${ref}" gefunden (weder als ID noch als Nummer).`);
+  return d;
 }
 
 async function resolveDocument(orgId: string, ref: string) {
@@ -86,10 +162,48 @@ async function resolveDocument(orgId: string, ref: string) {
   return q;
 }
 
-/** Wandelt MCP-Positionen (mit €/Menge oder Katalog-Verweis) in DB-Positionen um (Schema REGULAR, Kategorie S). */
-async function buildSimpleLines(
+async function resolveDeliveryNote(orgId: string, ref: string) {
+  const n = await dbInternal.deliveryNote.findFirst({ where: { orgId, OR: [{ id: ref }, { number: ref }] } });
+  if (!n) throw new Error(`Kein Lieferschein "${ref}" gefunden.`);
+  return n;
+}
+
+/** Loest einen Belegverweis (Nummer oder ID) fuer Beleganhaenge ueber alle DocRefType
+ *  hinweg auf — dieselbe Auflosung wie die uebrigen resolve*-Helfer, nur docType-generisch. */
+async function resolveDocForAttachment(orgId: string, docType: AttachmentDocType, ref: string): Promise<{ id: string }> {
+  switch (docType) {
+    case "INVOICE":
+      return resolveInvoice(orgId, ref);
+    case "QUOTE":
+      return resolveDocument(orgId, ref);
+    case "DELIVERY_NOTE":
+      return resolveDeliveryNote(orgId, ref);
+    case "RECURRING": {
+      const r = await dbInternal.recurringInvoice.findFirst({ where: { orgId, OR: [{ id: ref }, { title: ref }] } });
+      if (!r) throw new Error(`Kein Abo "${ref}" gefunden.`);
+      return r;
+    }
+    case "DUNNING": {
+      const d = await dbInternal.dunning.findFirst({ where: { id: ref, invoice: { orgId } } });
+      if (!d) throw new Error(`Keine Mahnung "${ref}" gefunden.`);
+      return d;
+    }
+  }
+}
+
+/** Wandelt MCP-Positionen (mit €/Menge oder Katalog-Verweis) in DB-Positionen um (Schema REGULAR, Kategorie S). Exportiert für Unit-Tests. */
+export async function buildSimpleLines(
   orgId: string,
-  inputLines: { description: string; quantity: number; unitPriceEuro?: number; productName?: string; unit?: string; taxRatePercent?: number }[],
+  inputLines: {
+    description: string;
+    quantity: number;
+    unitPriceEuro?: number;
+    productName?: string;
+    unit?: string;
+    taxRatePercent?: number;
+    discountPercent?: number;
+    discountAmount?: number;
+  }[],
 ) {
   const products = await dbInternal.product.findMany({ where: { orgId, isArchived: false } });
   return inputLines.map((l, idx) => {
@@ -113,12 +227,81 @@ async function buildSimpleLines(
       unitNetPriceCents: euroToCents(unitPriceEuro),
       taxRate: taxRate ?? 19,
       taxCategory: "S",
-      discountPermille: 0,
+      discountPermille: l.discountPercent ? Math.round(l.discountPercent * 10) : 0,
+      discountCents: l.discountAmount ? euroToCents(l.discountAmount) : 0,
     };
   });
 }
 
-const server = new McpServer({ name: "open-invoice-germany", version: "0.1.0" });
+/** Wie buildSimpleLines, aber mit lineType (Phase 4b, §8): HEADING/TEXT/SUBTOTAL tragen
+ *  nie einen Betrag und brauchen weder Menge noch Preis. Fuer update_invoice_draft. */
+async function buildEditorLines(
+  orgId: string,
+  inputLines: {
+    lineType?: "ITEM" | "HEADING" | "TEXT" | "SUBTOTAL";
+    description: string;
+    descriptionLong?: string;
+    articleNumber?: string;
+    quantity?: number;
+    unitPriceEuro?: number;
+    productName?: string;
+    unit?: string;
+    taxRatePercent?: number;
+    discountPercent?: number;
+    discountAmount?: number;
+  }[],
+) {
+  const products = await dbInternal.product.findMany({ where: { orgId, isArchived: false } });
+  return inputLines.map((l, idx) => {
+    const lineType = l.lineType ?? "ITEM";
+    if (lineType !== "ITEM") {
+      return {
+        lineType,
+        description: l.description,
+        descriptionLong: l.descriptionLong,
+        articleNumber: l.articleNumber,
+        quantityMilli: 0,
+        unit: l.unit ?? "C62",
+        unitNetPriceCents: 0,
+        taxRate: 0,
+        taxCategory: "S",
+        discountPermille: 0,
+        discountCents: 0,
+      };
+    }
+    let unitPriceEuro = l.unitPriceEuro;
+    let unit = l.unit;
+    let taxRate = l.taxRatePercent;
+    let description = l.description;
+    if (unitPriceEuro == null && l.productName) {
+      const p = products.find((x) => x.name.toLowerCase() === l.productName!.toLowerCase());
+      if (!p) throw new Error(`Produkt "${l.productName}" (Position ${idx + 1}) nicht gefunden.`);
+      unitPriceEuro = p.netPriceCents / 100;
+      unit = unit ?? p.unit;
+      taxRate = taxRate ?? p.taxRate;
+      description = description || p.name;
+    }
+    if (l.quantity == null) throw new Error(`Position ${idx + 1} (ITEM) braucht "quantity".`);
+    if (unitPriceEuro == null) throw new Error(`Position ${idx + 1} braucht unitPriceEuro oder productName.`);
+    return {
+      lineType: "ITEM" as const,
+      description,
+      descriptionLong: l.descriptionLong,
+      articleNumber: l.articleNumber,
+      quantityMilli: qtyToMilli(l.quantity),
+      unit: unit ?? "C62",
+      unitNetPriceCents: euroToCents(unitPriceEuro),
+      taxRate: taxRate ?? 19,
+      taxCategory: "S",
+      discountPermille: l.discountPercent ? Math.round(l.discountPercent * 10) : 0,
+      discountCents: l.discountAmount ? euroToCents(l.discountAmount) : 0,
+    };
+  });
+}
+
+// Exportiert fuer Integrationstests (test/integration/mcp-server.test.ts): erlaubt,
+// registrierte Tool-Handler direkt aufzurufen, ohne einen Stdio-Transport zu starten.
+export const server = new McpServer({ name: "open-invoice-germany", version: "0.1.0" });
 
 // ── get_status ──────────────────────────────────────────────────────────────
 server.registerTool(
@@ -200,6 +383,8 @@ server.registerTool(
       const org = existing
         ? await dbInternal.organization.update({ where: { id: existing.id }, data })
         : await dbInternal.organization.create({ data });
+      // idempotent, deshalb unabhaengig von Create/Update sicher aufrufbar
+      await ensureOrgMasterdata(dbInternal, org.id);
       return ok(`Unternehmen ${existing ? "aktualisiert" : "angelegt"}: ${org.legalName} (${org.id}).`);
     } catch (e) {
       return fail(`Konnte Unternehmen nicht speichern: ${(e as Error).message}`);
@@ -246,7 +431,11 @@ server.registerTool(
       email: z.string().optional(),
       contactName: z.string().optional(),
       leitwegId: z.string().optional().describe("Leitweg-ID für Behörden (B2G)"),
-      defaultPaymentTermsDays: z.number().int().min(0).max(365).default(14),
+      // S1 (Fix-Welle Phase 7): weggelassen = kein Kunden-Override, kaskadiert auf
+      // Zahlungsmethode -> DocumentSettings.invoiceDueDays -> 14 (siehe invoice/create.ts) —
+      // dieselbe Semantik wie die UI-/REST-API-Route (keine Bypass-Pfade, Lastenheft §55).
+      defaultPaymentTermsDays: z.number().int().min(0).max(365).optional().describe("Kunden-eigene Zahlungsfrist; weglassen = Zahlungsmethode/Voreinstellung greift"),
+      defaultPaymentMethod: z.string().optional().describe("Name oder Code der Standard-Zahlungsmethode"),
       notes: z.string().optional(),
     },
   },
@@ -254,6 +443,7 @@ server.registerTool(
     try {
       const org = await requireOrg();
       const v = customerSchema.parse({ ...args, email: args.email ?? "" });
+      const defaultPaymentMethod = args.defaultPaymentMethod ? await resolvePaymentMethod(org.id, args.defaultPaymentMethod) : null;
       const data = {
         type: v.type,
         name: v.name,
@@ -265,7 +455,8 @@ server.registerTool(
         email: v.email || null,
         vatId: v.vatId ?? null,
         leitwegId: v.leitwegId ?? null,
-        defaultPaymentTermsDays: v.defaultPaymentTermsDays,
+        defaultPaymentTermsDays: v.defaultPaymentTermsDays ?? null,
+        defaultPaymentMethodId: defaultPaymentMethod?.id,
         notes: v.notes ?? null,
       };
       const existing = (await dbInternal.customer.findMany({ where: { orgId: org.id, isArchived: false } })).find(
@@ -273,7 +464,10 @@ server.registerTool(
       );
       const customer = existing
         ? await dbInternal.customer.update({ where: { id: existing.id }, data })
-        : await dbInternal.customer.create({ data: { ...data, orgId: org.id } });
+        : await dbInternal.$transaction(async (tx) => {
+            const customerNumber = await assignCustomerNumber(tx, org.id);
+            return tx.customer.create({ data: { ...data, customerNumber, orgId: org.id } });
+          });
       return ok(`Kunde ${existing ? "aktualisiert" : "angelegt"}: ${customer.name} (${customer.id}).`);
     } catch (e) {
       return fail(`Konnte Kunde nicht speichern: ${(e as Error).message}`);
@@ -314,6 +508,7 @@ server.registerTool(
       unit: z.string().default("C62").describe("Einheit (UN/ECE): C62=Stück, HUR=Stunde, DAY=Tag, KGM=kg, MTR=m"),
       taxRatePercent: z.union([z.literal(19), z.literal(7), z.literal(0)]).default(19),
       description: z.string().optional(),
+      articleNumber: z.string().max(60).optional().describe("Artikelnummer, wird als Snapshot in Positionen uebernommen"),
     },
   },
   async (args): Promise<Result> => {
@@ -322,6 +517,7 @@ server.registerTool(
       const data = {
         name: args.name,
         description: args.description ?? null,
+        articleNumber: args.articleNumber ?? null,
         unit: args.unit,
         netPriceCents: euroToCents(args.netPriceEuro),
         taxRate: args.taxRatePercent,
@@ -332,7 +528,10 @@ server.registerTool(
       );
       const product = existing
         ? await dbInternal.product.update({ where: { id: existing.id }, data })
-        : await dbInternal.product.create({ data: { ...data, orgId: org.id } });
+        : await dbInternal.$transaction(async (tx) => {
+            const articleNumber = data.articleNumber ?? (await assignArticleNumber(tx, org.id));
+            return tx.product.create({ data: { ...data, articleNumber, orgId: org.id } });
+          });
       return ok(`Produkt ${existing ? "aktualisiert" : "gespeichert"}: ${product.name} — ${formatCents(product.netPriceCents)} / ${product.unit}.`);
     } catch (e) {
       return fail(`Konnte Produkt nicht speichern: ${(e as Error).message}`);
@@ -359,6 +558,7 @@ server.registerTool(
             unit: z.string().optional(),
             taxRatePercent: z.union([z.literal(19), z.literal(7), z.literal(0)]).optional(),
             discountPercent: z.number().min(0).max(100).optional(),
+            discountAmount: z.number().min(0).optional().describe("Zusaetzlicher Festbetragsrabatt je Position in Euro"),
           }),
         )
         .min(1),
@@ -367,6 +567,16 @@ server.registerTool(
       dueDate: z.string().optional(),
       notes: z.string().optional(),
       paymentTerms: z.string().optional(),
+      documentDiscountPercent: z.number().min(0).max(100).optional().describe("Belegrabatt in Prozent (auf alle Steuersaetze proportional verteilt)"),
+      documentDiscountEuro: z.number().min(0).optional().describe("Zusaetzlicher Belegrabatt als Festbetrag in Euro"),
+      documentChargePercent: z.number().min(0).max(100).optional().describe("Belegaufschlag in Prozent (nach Rabatt berechnet)"),
+      documentChargeEuro: z.number().min(0).optional().describe("Zusaetzlicher Belegaufschlag als Festbetrag in Euro"),
+      documentChargeReason: z.string().max(500).optional(),
+      skonto1Percent: z.number().min(0).max(100).optional().describe("1. Skontosatz in Prozent"),
+      skonto1Days: z.number().int().min(1).max(365).optional().describe("1. Skontofrist in Tagen"),
+      skonto2Percent: z.number().min(0).max(100).optional().describe("2. Skontosatz in Prozent (nur zusammen mit Skonto 1, laengere Frist)"),
+      skonto2Days: z.number().int().min(1).max(365).optional(),
+      paymentMethod: z.string().optional().describe("Name oder Code einer Zahlungsmethode (Default: Kunden-Standard)"),
     },
   },
   async (args): Promise<Result> => {
@@ -400,11 +610,13 @@ server.registerTool(
           taxRate: isRegular ? (taxRatePercent ?? 19) : 0,
           taxCategory: category,
           discountPermille: l.discountPercent ? Math.round(l.discountPercent * 10) : 0,
+          discountCents: l.discountAmount ? euroToCents(l.discountAmount) : 0,
         };
       });
 
       const notice = SCHEME_NOTICE[scheme];
       const notes = notice ? `${notice}${args.notes ? " — " + args.notes : ""}` : args.notes;
+      const paymentMethod = args.paymentMethod ? await resolvePaymentMethod(org.id, args.paymentMethod) : null;
 
       const input = createInvoiceSchema.parse({
         customerId: customer.id,
@@ -415,6 +627,16 @@ server.registerTool(
         dueDate: parseDateInput(args.dueDate),
         notes,
         paymentTerms: args.paymentTerms,
+        documentDiscountPermille: args.documentDiscountPercent ? Math.round(args.documentDiscountPercent * 10) : undefined,
+        documentDiscountCents: args.documentDiscountEuro ? euroToCents(args.documentDiscountEuro) : undefined,
+        documentChargePermille: args.documentChargePercent ? Math.round(args.documentChargePercent * 10) : undefined,
+        documentChargeCents: args.documentChargeEuro ? euroToCents(args.documentChargeEuro) : undefined,
+        documentChargeReason: args.documentChargeReason,
+        skonto1Permille: args.skonto1Percent ? Math.round(args.skonto1Percent * 10) : undefined,
+        skonto1Days: args.skonto1Days,
+        skonto2Permille: args.skonto2Percent ? Math.round(args.skonto2Percent * 10) : undefined,
+        skonto2Days: args.skonto2Days,
+        paymentMethodId: paymentMethod?.id,
         lines,
       });
       const invoice = await createDraftInvoice(org.id, input);
@@ -566,9 +788,10 @@ server.registerTool(
       const base = (inv.number ?? `entwurf-${inv.id.slice(0, 8)}`).replace(/[^A-Za-z0-9._-]/g, "_");
       const written: string[] = [];
       let validation: { valid: boolean; errors: string[] } | null = null;
+      const theme = await loadPdfTheme(org.id, inv.printOptionsJson);
 
       if (format === "both" || format === "pdf") {
-        const pdf = await renderInvoicePdf(data);
+        const pdf = await renderInvoicePdf(data, theme);
         const pdfPath = path.join(dir, `${base}.pdf`);
         writeFileSync(pdfPath, pdf);
         written.push(pdfPath);
@@ -586,7 +809,7 @@ server.registerTool(
       }
       if (format === "zugferd") {
         if (inv.status === "DRAFT") return fail("ZUGFeRD nur für festgeschriebene Rechnungen. Zuerst finalize_invoice.");
-        const zpdf = await renderZugferdPdf(data);
+        const zpdf = await renderZugferdPdf(data, theme);
         const zpath = path.join(dir, `${base}-zugferd.pdf`);
         writeFileSync(zpath, zpdf);
         written.push(zpath);
@@ -608,6 +831,8 @@ const docLineSchema = z.object({
   productName: z.string().optional(),
   unit: z.string().optional(),
   taxRatePercent: z.union([z.literal(19), z.literal(7), z.literal(0)]).optional(),
+  discountPercent: z.number().min(0).max(100).optional().describe("Positionsrabatt in Prozent"),
+  discountAmount: z.number().min(0).optional().describe("Zusätzlicher Festbetragsrabatt je Position in Euro"),
 });
 
 // ── create_document ─────────────────────────────────────────────────────────
@@ -623,6 +848,11 @@ server.registerTool(
       lines: z.array(docLineSchema).min(1),
       validUntil: z.string().optional().describe("Gültig bis YYYY-MM-DD (für Angebote)"),
       notes: z.string().optional(),
+      documentDiscountPercent: z.number().min(0).max(100).optional().describe("Belegrabatt in Prozent (auf alle Steuersaetze proportional verteilt)"),
+      documentDiscountEuro: z.number().min(0).optional().describe("Zusaetzlicher Belegrabatt als Festbetrag in Euro"),
+      documentChargePercent: z.number().min(0).max(100).optional().describe("Belegaufschlag in Prozent (nach Rabatt berechnet)"),
+      documentChargeEuro: z.number().min(0).optional().describe("Zusaetzlicher Belegaufschlag als Festbetrag in Euro"),
+      documentChargeReason: z.string().max(500).optional(),
     },
   },
   async (args): Promise<Result> => {
@@ -637,6 +867,11 @@ server.registerTool(
         currency: "EUR",
         validUntil: parseDateInput(args.validUntil),
         notes: args.notes,
+        documentDiscountPermille: args.documentDiscountPercent ? Math.round(args.documentDiscountPercent * 10) : undefined,
+        documentDiscountCents: args.documentDiscountEuro ? euroToCents(args.documentDiscountEuro) : undefined,
+        documentChargePermille: args.documentChargePercent ? Math.round(args.documentChargePercent * 10) : undefined,
+        documentChargeCents: args.documentChargeEuro ? euroToCents(args.documentChargeEuro) : undefined,
+        documentChargeReason: args.documentChargeReason,
         lines,
       });
       const doc = await createBusinessDocument(org.id, input);
@@ -686,10 +921,305 @@ server.registerTool(
     try {
       const org = await requireOrg();
       const doc = await resolveDocument(org.id, document);
-      const invoice = await convertDocumentToInvoice(doc.id);
-      return ok(`Umgewandelt: ${doc.number} → Rechnungs-Entwurf ${invoice.id}. Mit finalize_invoice festschreiben.`);
+      const result = await convertDocument(org.id, { fromType: "QUOTE", fromId: doc.id, toKind: "INVOICE" });
+      return ok(`Umgewandelt: ${doc.number} → Rechnungs-Entwurf ${result.id}. Mit finalize_invoice festschreiben.`);
     } catch (e) {
       if (e instanceof ConvertError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── convert_document (generisch: AB, Rechnung, Lieferschein) ─────────────────
+server.registerTool(
+  "convert_document",
+  {
+    title: "Dokument umwandeln (generisch)",
+    description:
+      "Wandelt ein Angebot in eine Auftragsbestaetigung um, ein Angebot/AB/Proforma in eine Rechnung, oder ein Angebot/AB/Rechnung in einen Lieferschein (mit optionalen Teilmengen). Fuer Rechnung -> Lieferschein 'fromType' auf INVOICE setzen.",
+    inputSchema: {
+      fromType: z.enum(["QUOTE", "INVOICE"]).default("QUOTE").describe("QUOTE fuer Angebot/AB/Proforma, INVOICE fuer eine Rechnung"),
+      document: z.string().describe("Dokument- oder Rechnungs-Nummer bzw. -ID der Quelle"),
+      // toKind/quantities wiederverwenden aus dem Routen-Schema (Fix-Runde 1, Befund 2) —
+      // deliveryDate bleibt ein eigener String-Typ, da hier natuerlichsprachliche Eingaben
+      // (z. B. "heute") ueber parseDateInput geparst werden, nicht Zod-coerce.
+      toKind: convertDocumentBodySchema.shape.toKind,
+      quantities: convertDocumentBodySchema.shape.quantities.describe(
+        "Nur fuer DELIVERY_NOTE: Mengen je Quellposition (in Milliunits). Ohne Angabe = volle Restmenge.",
+      ),
+      deliveryDate: z.string().optional().describe("Nur fuer DELIVERY_NOTE, YYYY-MM-DD"),
+    },
+  },
+  async ({ fromType, document, toKind, quantities, deliveryDate }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const src = fromType === "INVOICE" ? await resolveInvoice(org.id, document) : await resolveDocument(org.id, document);
+      const result = await convertDocument(org.id, {
+        fromType,
+        fromId: src.id,
+        toKind,
+        quantities,
+        deliveryDate: parseDateInput(deliveryDate),
+      });
+      return ok(`Umgewandelt zu ${toKind}: ${result.type} ${result.id}.`);
+    } catch (e) {
+      if (e instanceof ConvertError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── create_delivery_note (manuell) ────────────────────────────────────────────
+server.registerTool(
+  "create_delivery_note",
+  {
+    title: "Lieferschein anlegen (manuell)",
+    description: "Legt einen Lieferschein ohne Quelldokument an, z. B. fuer eine Direktlieferung ohne vorheriges Angebot.",
+    inputSchema: {
+      customer: z.string().describe("Kundenname oder -ID"),
+      lines: z.array(docLineSchema).min(1),
+      deliveryDate: z.string().optional().describe("YYYY-MM-DD"),
+      notes: z.string().optional(),
+    },
+  },
+  async (args): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const customer = await resolveCustomer(org.id, args.customer);
+      const lines = await buildSimpleLines(org.id, args.lines);
+      const input = createDeliveryNoteSchema.parse({
+        customerId: customer.id,
+        deliveryDate: parseDateInput(args.deliveryDate),
+        notes: args.notes,
+        lines: lines.map((l) => ({
+          description: l.description,
+          quantityMilli: l.quantityMilli,
+          unit: l.unit,
+          unitNetPriceCents: l.unitNetPriceCents,
+          taxRate: l.taxRate,
+        })),
+      });
+      const note = await createDeliveryNote(org.id, input);
+      return ok(`Lieferschein angelegt: ${note.number} für ${customer.name}.`);
+    } catch (e) {
+      if (e instanceof DeliveryNoteError) return fail(e.message);
+      return fail(`Konnte Lieferschein nicht anlegen: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── set_document_status ───────────────────────────────────────────────────────
+server.registerTool(
+  "set_document_status",
+  {
+    title: "Dokument-/Lieferscheinstatus setzen",
+    description:
+      "Setzt den Status eines Angebots/einer Auftragsbestaetigung (QUOTE) oder eines Lieferscheins (DELIVERY_NOTE): MARK_SENT, MARK_ACCEPTED, MARK_REJECTED (nur QUOTE), MARK_CREATED, MARK_DELIVERED (nur DELIVERY_NOTE), CANCEL, ARCHIVE, UNARCHIVE. MARK_CREATED vergibt bei einem DRAFT-Lieferschein (z. B. einem Duplikat) die Belegnummer.",
+    inputSchema: {
+      type: z.enum(["QUOTE", "DELIVERY_NOTE"]),
+      document: z.string().describe("Nummer oder ID des Angebots/Lieferscheins"),
+      action: documentStatusActionSchema.shape.action,
+      note: z.string().optional(),
+    },
+  },
+  async ({ type, document, action, note }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const doc = type === "QUOTE" ? await resolveDocument(org.id, document) : await resolveDeliveryNote(org.id, document);
+
+      if (action === "ARCHIVE" || action === "UNARCHIVE") {
+        await setArchived(org.id, type, doc.id, action === "ARCHIVE", "mcp");
+        return ok(`Status gesetzt: ${action}.`);
+      }
+
+      if (type === "QUOTE") {
+        if (action !== "MARK_SENT" && action !== "MARK_ACCEPTED" && action !== "MARK_REJECTED" && action !== "CANCEL") {
+          return fail(`${action} ist fuer QUOTE nicht gueltig.`);
+        }
+        const target = { MARK_SENT: "SENT", MARK_ACCEPTED: "ACCEPTED", MARK_REJECTED: "REJECTED", CANCEL: "CANCELLED" } as const;
+        const updated = await setQuoteStatus(org.id, doc.id, target[action], { actor: "mcp", note });
+        return ok(`Status gesetzt: ${updated.status}.`);
+      }
+
+      if (action !== "MARK_CREATED" && action !== "MARK_SENT" && action !== "MARK_DELIVERED" && action !== "CANCEL") {
+        return fail(`${action} ist fuer DELIVERY_NOTE nicht gueltig.`);
+      }
+      const target = { MARK_CREATED: "CREATED", MARK_SENT: "SENT", MARK_DELIVERED: "DELIVERED", CANCEL: "CANCELLED" } as const;
+      const updated = await setDeliveryNoteStatus(org.id, doc.id, target[action], { actor: "mcp", note });
+      return ok(`Status gesetzt: ${updated.status}${updated.number ? ` (Nummer ${updated.number})` : ""}.`);
+    } catch (e) {
+      if (e instanceof StatusTransitionError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── duplicate_document ────────────────────────────────────────────────────────
+server.registerTool(
+  "duplicate_document",
+  {
+    title: "Beleg duplizieren",
+    description: "Dupliziert ein Angebot/AB/Proforma (QUOTE), einen Lieferschein (DELIVERY_NOTE) oder eine Rechnung (INVOICE) als neuen Entwurf.",
+    inputSchema: {
+      type: z.enum(["QUOTE", "DELIVERY_NOTE", "INVOICE"]),
+      document: z.string().describe("Nummer oder ID der Quelle"),
+    },
+  },
+  async ({ type, document }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const src: DuplicatableType = type;
+      const doc =
+        type === "QUOTE"
+          ? await resolveDocument(org.id, document)
+          : type === "INVOICE"
+            ? await resolveInvoice(org.id, document)
+            : await resolveDeliveryNote(org.id, document);
+      const copy = await duplicateDocument(org.id, src, doc.id, "mcp");
+      return ok(`Dupliziert als neuer Entwurf: ${copy.type} ${copy.id}.`);
+    } catch (e) {
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── create_partial_invoice / create_downpayment_invoice / create_final_invoice ──
+// Task 4 (Phase 5, §13-15 UStG): dieselben Domain-Funktionen/Zod-Schemas wie die
+// Routen unter /api/documents/[id]/*-invoice — keine Bypass-Pfade (Lastenheft 55).
+// permille wird hier als Prozent (0,1..100,0) entgegengenommen (Konvention wie
+// discountPercent in buildSimpleLines), amountCents als Euro-Betrag.
+
+server.registerTool(
+  "create_partial_invoice",
+  {
+    title: "Teilrechnung anlegen",
+    description:
+      "Erstellt eine Teilrechnung (§13 UStG, Entwurf) aus einem Angebot/einer Auftragsbestaetigung oder einem Lieferschein — als Anteil (Prozent/Netto-/Bruttobetrag je Steuersatz) oder als konkrete Positionen/Mengen. Danach mit finalize_invoice festschreiben.",
+    inputSchema: {
+      sourceType: z.enum(["QUOTE", "DELIVERY_NOTE"]).default("QUOTE").describe("QUOTE fuer Angebot/AB, DELIVERY_NOTE fuer einen Lieferschein"),
+      source: z.string().describe("Nummer oder ID der Quelle"),
+      mode: z.enum(["PERCENT", "NET_AMOUNT", "GROSS_AMOUNT", "POSITIONS", "QUANTITIES"]),
+      percent: z.number().min(0.1).max(100).optional().describe("Nur mode PERCENT: Anteil in Prozent, z. B. 30 fuer 30 %"),
+      amountEuro: z.number().positive().optional().describe("Nur mode NET_AMOUNT/GROSS_AMOUNT: Betrag in Euro"),
+      lineIds: z.array(z.string()).optional().describe("Nur mode POSITIONS: IDs der vollstaendig abzurechnenden Quellpositionen"),
+      quantities: z
+        .array(z.object({ sourceLineId: z.string(), quantityMilli: z.number().int().positive() }))
+        .optional()
+        .describe("Nur mode QUANTITIES: Mengen je Quellposition in Milliunits (Stk*1000)"),
+    },
+  },
+  async ({ sourceType, source, mode, percent, amountEuro, lineIds, quantities }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      // Der MCP-SDK-Client wendet Zod-Defaults aus inputSchema an; direkte Testaufrufe
+      // (server["_registeredTools"][name].handler(args)) umgehen das — hier zusaetzlich
+      // defensiv defaulten, damit beide Aufrufwege identisch funktionieren.
+      const effectiveSourceType = sourceType ?? "QUOTE";
+      const src = effectiveSourceType === "DELIVERY_NOTE" ? await resolveDeliveryNote(org.id, source) : await resolveDocument(org.id, source);
+      const input = createPartialInvoiceSchema.parse({
+        sourceType: effectiveSourceType,
+        sourceId: src.id,
+        mode,
+        permille: percent != null ? Math.round(percent * 10) : undefined,
+        amountCents: amountEuro != null ? euroToCents(amountEuro) : undefined,
+        lineIds,
+        quantities,
+      });
+      const invoice = await createPartialInvoice(org.id, input);
+      return ok(`Teilrechnung angelegt: Entwurf ${invoice.id} (${formatCents(invoice.grossTotalCents)} brutto). Mit finalize_invoice festschreiben.`);
+    } catch (e) {
+      if (e instanceof z.ZodError) return fail(`Validierung fehlgeschlagen: ${e.issues.map((i) => i.message).join("; ")}`);
+      if (e instanceof PartialInvoiceError || e instanceof PricingError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+server.registerTool(
+  "create_downpayment_invoice",
+  {
+    title: "Abschlagsrechnung anlegen",
+    description:
+      "Erstellt eine Abschlagsrechnung (§13/§14 Abs. 5 UStG, Entwurf) auf ein Angebot/eine Auftragsbestaetigung — als Prozentanteil oder Festbetrag. Danach mit finalize_invoice festschreiben; nach mindestens einem festgeschriebenen Abschlag kann eine Schlussrechnung erzeugt werden.",
+    inputSchema: {
+      source: z.string().describe("Nummer oder ID des Angebots/der Auftragsbestaetigung"),
+      mode: z.enum(["PERCENT", "AMOUNT"]),
+      percent: z.number().min(0.1).max(100).optional().describe("Nur mode PERCENT: Anteil in Prozent"),
+      amountEuro: z.number().positive().optional().describe("Nur mode AMOUNT: Betrag in Euro"),
+      amountIsGross: z.boolean().default(false).describe("Nur mode AMOUNT: amountEuro als Brutto- statt Nettobetrag lesen"),
+    },
+  },
+  async ({ source, mode, percent, amountEuro, amountIsGross }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const quote = await resolveDocument(org.id, source);
+      const input = createDownpaymentInvoiceSchema.parse({
+        sourceType: "QUOTE",
+        sourceId: quote.id,
+        mode,
+        permille: percent != null ? Math.round(percent * 10) : undefined,
+        amountCents: amountEuro != null ? euroToCents(amountEuro) : undefined,
+        amountIsGross,
+      });
+      const invoice = await createDownpaymentInvoice(org.id, input);
+      return ok(`Abschlagsrechnung angelegt: Entwurf ${invoice.id} (${formatCents(invoice.grossTotalCents)} brutto). Mit finalize_invoice festschreiben.`);
+    } catch (e) {
+      if (e instanceof z.ZodError) return fail(`Validierung fehlgeschlagen: ${e.issues.map((i) => i.message).join("; ")}`);
+      if (e instanceof DownpaymentInvoiceError || e instanceof PricingError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+server.registerTool(
+  "create_final_invoice",
+  {
+    title: "Schlussrechnung anlegen",
+    description:
+      "Erstellt eine Schlussrechnung (§14 Abs. 5 UStG, Entwurf) ueber die gesamte Leistung eines Angebots/einer Auftragsbestaetigung. Voraussetzung: mindestens eine festgeschriebene, nicht stornierte Abschlagsrechnung. Beim Festschreiben werden die Abschlaege automatisch als Abzug ausgewiesen (Restbetrag).",
+    inputSchema: { source: z.string().describe("Nummer oder ID des Angebots/der Auftragsbestaetigung") },
+  },
+  async ({ source }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const quote = await resolveDocument(org.id, source);
+      const input = createFinalInvoiceSchema.parse({ sourceType: "QUOTE", sourceId: quote.id });
+      const invoice = await createFinalInvoice(org.id, input);
+      return ok(`Schlussrechnung angelegt: Entwurf ${invoice.id}. Mit finalize_invoice festschreiben (Abzugs-Snapshot/Restbetrag werden dabei berechnet).`);
+    } catch (e) {
+      if (e instanceof z.ZodError) return fail(`Validierung fehlgeschlagen: ${e.issues.map((i) => i.message).join("; ")}`);
+      if (e instanceof FinalInvoiceError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── get_billing_state ────────────────────────────────────────────────────────
+server.registerTool(
+  "get_billing_state",
+  {
+    title: "Abrechnungsstand anzeigen",
+    description: "Zeigt den Abrechnungsstand (NONE/PARTIAL/FULL, Prozent, Summe Abschlaege) eines Angebots/einer Auftragsbestaetigung — Grundlage fuer create_partial_invoice/create_downpayment_invoice/create_final_invoice.",
+    inputSchema: { document: z.string().describe("Dokument-Nummer oder -ID") },
+  },
+  async ({ document }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const doc = await resolveDocument(org.id, document);
+      const billing = await billingStateFor(org.id, "QUOTE", doc.id);
+      return ok(
+        JSON.stringify(
+          {
+            state: billing.state,
+            billedPercent: billing.billedPermille / 10,
+            downpaymentGross: formatCents(billing.downpaymentGrossCents),
+            invoiceIds: billing.invoiceIds,
+          },
+          null,
+          2,
+        ),
+      );
+    } catch (e) {
       return fail(`Fehler: ${(e as Error).message}`);
     }
   },
@@ -734,26 +1264,75 @@ server.registerTool(
   "record_payment",
   {
     title: "Zahlung erfassen",
-    description: "Erfasst einen Zahlungseingang auf eine festgeschriebene Rechnung und aktualisiert offenen Betrag + Status (bezahlt/teilbezahlt).",
+    description:
+      "Erfasst einen Zahlungseingang auf eine festgeschriebene Rechnung und aktualisiert offenen Betrag + Status (bezahlt/teilbezahlt). " +
+      "Faellt die Zahlung in eine Skontofrist der Rechnung, wird ein Vorschlag zurueckgegeben; mit applySkonto=true wird der verbleibende " +
+      "Rest sofort als zweite Zahlung (Skontoabzug) gebucht.",
     inputSchema: {
       invoice: z.string().describe("Rechnungs-ID oder -Nummer"),
       amountEuro: z.number().describe("Gezahlter Betrag in Euro"),
-      method: z.enum(["TRANSFER", "CASH", "CARD", "SEPA"]).default("TRANSFER"),
+      paidAt: z.string().optional().describe("Zahlungsdatum YYYY-MM-DD oder 'heute' (Default: heute)"),
+      method: PaymentMethod.default("TRANSFER"),
       reference: z.string().optional(),
+      applySkonto: z.boolean().default(false).describe("Erkannten Skontoabzug sofort als zweite Zahlung buchen"),
     },
   },
   async (args): Promise<Result> => {
     try {
       const org = await requireOrg();
       const inv = await resolveInvoice(org.id, args.invoice);
-      const updated = await recordPayment(
+      const result = await recordPayment(
         inv.id,
-        recordPaymentSchema.parse({ amountCents: euroToCents(args.amountEuro), method: args.method, reference: args.reference }),
+        recordPaymentSchema.parse({
+          amountCents: euroToCents(args.amountEuro),
+          paidAt: parseDateInput(args.paidAt),
+          method: args.method,
+          reference: args.reference,
+          applySkonto: args.applySkonto,
+        }),
       );
+      const updated = result.payment;
       const open = updated.grossTotalCents - updated.paidAmountCents;
-      return ok(`Zahlung erfasst. Status: ${updated.status} · offen: ${formatCents(open)}.`);
+      const skontoNote = result.skontoPayment
+        ? ` Skontoabzug ${formatCents(result.skontoPayment.amountCents)} automatisch gebucht — Rechnung vollstaendig bezahlt.`
+        : result.skontoSuggestion
+          ? ` Skonto moeglich bis ${result.skontoSuggestion.dueDate.toISOString().slice(0, 10)} (${formatCents(result.skontoSuggestion.restCents)}) — mit applySkonto=true buchen.`
+          : "";
+      return ok(`Zahlung erfasst. Status: ${updated.status} · offen: ${formatCents(open)}.${skontoNote}`);
     } catch (e) {
       if (e instanceof PaymentError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── list_payment_methods ────────────────────────────────────────────────────
+server.registerTool(
+  "list_payment_methods",
+  {
+    title: "Zahlungsmethoden auflisten",
+    description: "Listet die Zahlungsmethoden der Organisation (Code, Name, Zahlungsziel, aktiv/System) — nuetzlich, um Codes fuer create_invoice/record_payment nachzuschlagen.",
+    inputSchema: {},
+  },
+  async (): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const methods = await listPaymentMethods(org.id);
+      return ok(
+        JSON.stringify(
+          methods.map((m) => ({
+            id: m.id,
+            code: m.code,
+            name: m.name,
+            paymentTermsDays: m.paymentTermsDays,
+            isSystem: m.isSystem,
+            isActive: m.isActive,
+          })),
+          null,
+          2,
+        ),
+      );
+    } catch (e) {
       return fail(`Fehler: ${(e as Error).message}`);
     }
   },
@@ -765,18 +1344,130 @@ server.registerTool(
   {
     title: "Mahnung / Zahlungserinnerung erstellen",
     description:
-      "Erstellt die nächste Mahnstufe (Zahlungserinnerung → 1./2. Mahnung) zu einer überfälligen, offenen Rechnung. Ab Stufe 1 mit Verzugszins (§ 288 BGB) und 40-€-Pauschale (nur B2B).",
-    inputSchema: { invoice: z.string().describe("Rechnungs-ID oder -Nummer") },
+      "Erstellt die nächste konfigurierte Mahnstufe (Zahlungserinnerung → 1./2./…​ Mahnung) zu einer überfälligen, offenen Rechnung. Ab Stufe ≥ 2 mit Mahnkosten, je nach Stufe mit Verzugszins (§ 288 BGB) und 40-€-Pauschale (nur B2B). Ist die Stufe noch nicht fällig, schlägt der Aufruf fehl — mit force=true trotzdem erzwingen.",
+    inputSchema: {
+      invoice: z.string().describe("Rechnungs-ID oder -Nummer"),
+      force: z.boolean().optional().describe("Erstellung vor Fälligkeit der nächsten Stufe erzwingen"),
+    },
   },
-  async ({ invoice }): Promise<Result> => {
+  async ({ invoice, force }): Promise<Result> => {
     try {
       const org = await requireOrg();
       const inv = await resolveInvoice(org.id, invoice);
-      const res = await createDunning(inv.id);
-      const title = ["Zahlungserinnerung", "1. Mahnung", "2. Mahnung"][res.level] ?? `${res.level}. Mahnung`;
-      return ok(`${title} ${res.dunning.number} erstellt · offen ${formatCents(res.openAmountCents)} · Gesamtforderung ${formatCents(res.totalCents)}.`);
+      const res = await createDunning(inv.id, { force, createdBy: "mcp" });
+      return ok(`${res.stage.name} ${res.dunning.number} erstellt · offen ${formatCents(res.openAmountCents)} · Gesamtforderung ${formatCents(res.totalCents)}.`);
     } catch (e) {
       if (e instanceof DunningError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── send_dunning ──────────────────────────────────────────────────────────────
+server.registerTool(
+  "send_dunning",
+  {
+    title: "Mahnung per E-Mail versenden",
+    description: "Versendet eine bereits erstellte Mahnung per E-Mail an den Kunden (Vorlage der zugehörigen Mahnstufe).",
+    inputSchema: {
+      dunning: z.string().describe("Mahnungs-ID oder -Nummer"),
+      to: z.email().optional().describe("Empfänger ueberschreiben (sonst Kundenstamm/Snapshot)"),
+    },
+  },
+  async ({ dunning, to }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const d = await resolveDunning(org.id, dunning);
+      const result = await sendDunning(org.id, d.id, { actor: "mcp", to });
+      if (result.status === "FAILED") return fail(result.error ?? "Versand fehlgeschlagen.");
+      return ok(`Mahnung ${d.number ?? d.id} versendet.`);
+    } catch (e) {
+      if (e instanceof MailNotConfiguredError) return fail(e.message);
+      if (e instanceof DunningError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── set_dunning_state ─────────────────────────────────────────────────────────
+server.registerTool(
+  "set_dunning_state",
+  {
+    title: "Mahnprozess-Status setzen",
+    description: "Setzt den Mahnprozess einer Rechnung auf ACTIVE (normal), PAUSED (bis pausedUntil ausgesetzt, z.B. Ratenzahlung) oder STOPPED (dauerhaft angehalten, z.B. Inkasso).",
+    inputSchema: {
+      invoice: z.string().describe("Rechnungs-ID oder -Nummer"),
+      state: z.enum(["ACTIVE", "PAUSED", "STOPPED"]),
+      pausedUntil: z.iso.date().optional().describe("Nur bei state=PAUSED"),
+      note: z.string().max(500).optional(),
+    },
+  },
+  async ({ invoice, state, pausedUntil, note }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const inv = await resolveInvoice(org.id, invoice);
+      const res = await setDunningState(org.id, inv.id, { state, pausedUntil, note }, "mcp");
+      return ok(`Mahnprozess-Status: ${res.state}${res.pausedUntil ? ` bis ${res.pausedUntil.toISOString().slice(0, 10)}` : ""}.`);
+    } catch (e) {
+      if (e instanceof DunningError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── list_overdue_invoices ──────────────────────────────────────────────────────
+server.registerTool(
+  "list_overdue_invoices",
+  {
+    title: "Überfällige Rechnungen auflisten (Mahnwesen-Übersicht)",
+    description: "Listet überfällige, offene Rechnungen mit Mahnstatus (aktuelle/nächste Mahnstufe, fällig ab, pausiert bis, letzter Kontakt) — dieselben Daten wie /mahnwesen.",
+    inputSchema: { state: z.enum(["ACTIVE", "PAUSED", "STOPPED"]).optional() },
+  },
+  async ({ state }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const overview = await loadDunningOverview(org.id, new Date(), { state });
+      return ok(
+        JSON.stringify(
+          {
+            widgets: overview.widgets,
+            rows: overview.rows.map((r) => ({
+              invoice: r.number ?? r.invoiceId,
+              customer: r.customerName,
+              openAmount: formatCents(r.openCents),
+              daysOverdue: r.daysOverdue,
+              currentStage: r.currentStage?.name ?? null,
+              nextStage: r.nextStage?.name ?? null,
+              nextDunningAt: r.nextDunningAt ? r.nextDunningAt.toISOString().slice(0, 10) : null,
+              dunningState: r.dunningState,
+              pausedUntil: r.pausedUntil ? r.pausedUntil.toISOString().slice(0, 10) : null,
+            })),
+          },
+          null,
+          2,
+        ),
+      );
+    } catch (e) {
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── run_scheduler_job ─────────────────────────────────────────────────────────
+server.registerTool(
+  "run_scheduler_job",
+  {
+    title: "Scheduler-Job manuell anstoßen",
+    description: "Stößt den Mahn-Scheduler ('dunning', automatischer Mahnlauf) und/oder den Abo-Scheduler ('recurring') sofort an, statt auf den nächsten Intervall-Lauf zu warten.",
+    inputSchema: { job: z.enum(["dunning", "recurring"]).optional().describe("Nur diesen Job ausführen (sonst beide, Reihenfolge recurring → dunning)") },
+  },
+  async ({ job }): Promise<Result> => {
+    try {
+      const jobs: SchedulerJob[] | undefined = job ? [job] : undefined;
+      const results = await runScheduledJobs({ jobs, trigger: "MANUAL" });
+      const lines = results.map((r) => `${r.job}: ${r.ok ? "OK" : `FEHLER (${r.error})`} · ${JSON.stringify(r.summary)}`);
+      return ok(lines.join("\n"));
+    } catch (e) {
       return fail(`Fehler: ${(e as Error).message}`);
     }
   },
@@ -799,7 +1490,8 @@ server.registerTool(
       endDate: z.string().optional().describe("Letzter Stichtag YYYY-MM-DD (optional)"),
       anchorDay: z.number().int().min(1).max(28).optional().describe("Fester Tag im Monat (1..28)"),
       paymentTermsDays: z.number().int().min(0).max(365).default(14),
-      autoFinalize: z.boolean().default(false).describe("true = erzeugte Rechnungen sofort festschreiben"),
+      autoFinalize: z.boolean().optional().describe("true = erzeugte Rechnungen sofort festschreiben (ohne Angabe: Org-Standard aus den Einstellungen)"),
+      autoSend: z.boolean().optional().describe("true = erzeugte Rechnungen automatisch per E-Mail versenden (ohne Angabe: Org-Standard aus den Einstellungen)"),
       notes: z.string().optional(),
     },
   },
@@ -820,6 +1512,7 @@ server.registerTool(
         endDate: parseDateInput(args.endDate),
         paymentTermsDays: args.paymentTermsDays,
         autoFinalize: args.autoFinalize,
+        autoSend: args.autoSend,
         taxScheme: "REGULAR",
         currency: "EUR",
         notes: args.notes,
@@ -915,6 +1608,499 @@ server.registerTool(
   },
 );
 
+// ── create_share_link ─────────────────────────────────────────────────────────
+server.registerTool(
+  "create_share_link",
+  {
+    title: "Angebots-Annahmelink erzeugen",
+    description:
+      "Erzeugt einen oeffentlichen Annahme-Link (ohne Login) fuer ein Angebot (kind=ANGEBOT, Status DRAFT/SENT/EXPIRED). Der Kunde kann darueber das Angebot ansehen, als PDF herunterladen und annehmen/ablehnen. expiresInDays ueberschreibt die Standard-Gueltigkeitsdauer aus den Dokument-Einstellungen.",
+    inputSchema: {
+      documentId: z.string().describe("Nummer oder ID des Angebots"),
+      expiresInDays: z.number().int().min(1).max(365).optional(),
+    },
+  },
+  async ({ documentId, expiresInDays }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const doc = await resolveDocument(org.id, documentId);
+      const { link, token } = await createShareLink(org.id, doc.id, { expiresInDays });
+      const baseUrl = appBaseUrlFromEnv();
+      const url = baseUrl ? `${baseUrl}/angebot/${token}` : `(APP_BASE_URL nicht gesetzt) /angebot/${token}`;
+      return ok(`Annahme-Link erzeugt fuer ${doc.number ?? doc.id} · gueltig bis ${link.expiresAt.toISOString().slice(0, 10)} · ${url}`);
+    } catch (e) {
+      if (e instanceof ShareLinkError) return fail(e.message);
+      if (e instanceof SecretsUnavailableError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── revoke_share_link ─────────────────────────────────────────────────────────
+server.registerTool(
+  "revoke_share_link",
+  {
+    title: "Angebots-Annahmelink widerrufen",
+    description: "Widerruft einen Angebots-Annahmelink (linkId). Der Link liefert danach 404, eine Entscheidung ist nicht mehr moeglich.",
+    inputSchema: {
+      linkId: z.string(),
+    },
+  },
+  async ({ linkId }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      await revokeShareLink(org.id, linkId);
+      return ok(`Link ${linkId} widerrufen.`);
+    } catch (e) {
+      if (e instanceof NotFoundError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── list_share_links ──────────────────────────────────────────────────────────
+server.registerTool(
+  "list_share_links",
+  {
+    title: "Angebots-Annahmelinks auflisten",
+    description:
+      "Listet alle Annahme-Links eines Angebots mit Status/Aufrufen/Entscheidung — NIE den Klartext-Token (der ist ueber diesen Weg nicht abrufbar; siehe Betreiber-UI fuer 'Link anzeigen').",
+    inputSchema: {
+      documentId: z.string().describe("Nummer oder ID des Angebots"),
+    },
+  },
+  async ({ documentId }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const doc = await resolveDocument(org.id, documentId);
+      const links = await listShareLinks(org.id, doc.id);
+      if (links.length === 0) return ok(`Keine Annahme-Links fuer ${doc.number ?? doc.id}.`);
+      const lines = links.map((l) => {
+        const status = l.revokedAt
+          ? "widerrufen"
+          : l.decidedAt
+            ? `entschieden (${l.decision})`
+            : l.expiresAt.getTime() < Date.now()
+              ? "abgelaufen"
+              : "aktiv";
+        return `• ${l.id} · ${status} · erzeugt ${l.createdAt.toISOString().slice(0, 10)} · laeuft ab ${l.expiresAt.toISOString().slice(0, 10)} · ${l.viewCount} Aufruf(e)`;
+      });
+      return ok(lines.join("\n"));
+    } catch (e) {
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── get_settings ─────────────────────────────────────────────────────────────
+server.registerTool(
+  "get_settings",
+  {
+    title: "Einstellungen abrufen",
+    description:
+      "Liest die Einstellungen eines Bereichs: documents (Beleg-Defaults, §33), print (globale Druckoptionen, §36), branding (Briefpapier, §35 — ohne Dateiinhalte), numberRanges (Nummernkreise, §34, optional 'year'), dunning (Mahnwesen-Einstellungen, §26).",
+    inputSchema: {
+      area: z.enum(["documents", "print", "branding", "numberRanges", "dunning"]),
+      year: z.number().int().optional().describe("Nur fuer area=numberRanges — Geschaeftsjahr (Default: laufendes Jahr)"),
+    },
+  },
+  async ({ area, year }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      switch (area) {
+        case "documents":
+          return ok(JSON.stringify(await loadDocumentSettings(org.id), null, 2));
+        case "print":
+          return ok(JSON.stringify(await loadPrintSettings(org.id), null, 2));
+        case "branding":
+          return ok(JSON.stringify(await loadBrandingSettings(org.id), null, 2));
+        case "numberRanges":
+          return ok(JSON.stringify(await listNumberRanges(org.id, year ?? new Date().getFullYear()), null, 2));
+        case "dunning":
+          return ok(JSON.stringify(await loadDunningSettings(org.id), null, 2));
+      }
+    } catch (e) {
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── update_document_settings ───────────────────────────────────────────────────
+server.registerTool(
+  "update_document_settings",
+  {
+    title: "Beleg-Einstellungen aktualisieren",
+    description:
+      "Aktualisiert die org-weiten Beleg-Einstellungen (§33: Angebote/Rechnungen/Lieferscheine/wiederkehrende Rechnungen). Nicht angegebene Felder bleiben unveraendert (Merge mit dem aktuellen Stand).",
+    inputSchema: documentSettingsInputSchema.partial().shape,
+  },
+  async (args): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const current = await loadDocumentSettings(org.id);
+      const saved = await saveDocumentSettings(org.id, { ...current, ...args });
+      return ok(`Beleg-Einstellungen gespeichert: ${JSON.stringify(saved)}`);
+    } catch (e) {
+      if (e instanceof z.ZodError) return fail(`Validierung fehlgeschlagen: ${e.issues.map((i) => i.message).join("; ")}`);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── update_print_settings ──────────────────────────────────────────────────────
+server.registerTool(
+  "update_print_settings",
+  {
+    title: "Globale Druckoptionen aktualisieren",
+    description: "Aktualisiert die zehn globalen Druckoptionen-Schalter (§36). Nicht angegebene Felder bleiben unveraendert (Merge mit dem aktuellen Stand).",
+    inputSchema: printSettingsInputSchema.partial().shape,
+  },
+  async (args): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const current = await loadPrintSettings(org.id);
+      const saved = await savePrintSettings(org.id, { ...current, ...args });
+      return ok(`Druckoptionen gespeichert: ${JSON.stringify(saved)}`);
+    } catch (e) {
+      if (e instanceof z.ZodError) return fail(`Validierung fehlgeschlagen: ${e.issues.map((i) => i.message).join("; ")}`);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── update_branding_settings ───────────────────────────────────────────────────
+server.registerTool(
+  "update_branding_settings",
+  {
+    title: "Briefpapier-Einstellungen aktualisieren",
+    description:
+      "Aktualisiert Farbe/Raender/Schriftgroesse/Fusszeilen/Absenderzeile des Briefpapiers (§35). OHNE Dateien — Logo-/Hintergrund-Upload nur ueber die UI-Route (Magic-Byte-Pruefung). Nicht angegebene Felder bleiben unveraendert.",
+    inputSchema: brandingSettingsInputSchema.omit({ logoPath: true, backgroundPath: true }).partial().shape,
+  },
+  async (args): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const current = await loadBrandingSettings(org.id);
+      // Verteidigung in der Tiefe: logoPath/backgroundPath NIE aus `args` uebernehmen,
+      // selbst wenn ein Aufrufer sie mitschickt — die inputSchema-Validierung des
+      // McpServer-Dispatchers wuerde sie zwar bereits herausfiltern (Zod-Objekt ohne
+      // .passthrough), aber ein direkter Handler-Aufruf (z. B. in Tests) umgeht diese
+      // Schicht. Datei-Uploads laufen ausschliesslich ueber die UI-Route.
+      const { logoPath: _ignoredLogoPath, backgroundPath: _ignoredBackgroundPath, ...safeArgs } = args as Record<string, unknown>;
+      void _ignoredLogoPath;
+      void _ignoredBackgroundPath;
+      const saved = await saveBrandingSettings(org.id, { ...current, ...safeArgs, logoPath: current.logoPath, backgroundPath: current.backgroundPath });
+      return ok(`Briefpapier-Einstellungen gespeichert: ${JSON.stringify(saved)}`);
+    } catch (e) {
+      if (e instanceof z.ZodError) return fail(`Validierung fehlgeschlagen: ${e.issues.map((i) => i.message).join("; ")}`);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── update_number_range ────────────────────────────────────────────────────────
+server.registerTool(
+  "update_number_range",
+  {
+    title: "Nummernkreis aktualisieren",
+    description:
+      "Aktualisiert Muster/Praefix/Polsterung/jaehrlichen Reset/naechste Nummer eines Nummernkreises (§34, u.a. CUSTOMER/PRODUCT/INVOICE/ANGEBOT/...). Nummern koennen nie zurueckgedreht werden (GoBD). Nicht angegebene Felder bleiben unveraendert (Merge mit dem aktuellen Stand des laufenden Jahres).",
+    inputSchema: {
+      docType: NumberRangeDocType,
+      pattern: z.string().optional(),
+      prefix: z.string().optional(),
+      seqPadding: z.number().int().min(1).max(8).optional(),
+      yearlyReset: z.boolean().optional(),
+      nextValue: z.number().int().min(1).optional(),
+    },
+  },
+  async ({ docType, ...args }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const year = new Date().getFullYear();
+      const ranges = await listNumberRanges(org.id, year);
+      const current = ranges.find((r) => r.docType === docType);
+      if (!current) return fail(`Unbekannter Nummernkreis-Typ "${docType}".`);
+      const merged = {
+        pattern: args.pattern ?? current.pattern,
+        prefix: args.prefix ?? current.prefix,
+        seqPadding: args.seqPadding ?? current.seqPadding,
+        yearlyReset: args.yearlyReset ?? current.yearlyReset,
+        nextValue: args.nextValue ?? current.currentValue + 1,
+      };
+      const saved = await updateNumberRange(org.id, docType, merged, "mcp");
+      return ok(`Nummernkreis "${docType}" gespeichert: ${JSON.stringify(saved)}`);
+    } catch (e) {
+      if (e instanceof z.ZodError) return fail(`Validierung fehlgeschlagen: ${e.issues.map((i) => i.message).join("; ")}`);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── set_print_options ────────────────────────────────────────────────────────
+// S9 (Fix-Welle, Final-Review): MCP-Pendant zu PUT /api/{invoices,documents,
+// delivery-notes}/[id]/print-options — dieselbe Domain-Funktion (setPrintOptions),
+// dieselbe Zod-Validierung (printOptionsOverrideSchema), kein Bypass-Pfad (§55).
+server.registerTool(
+  "set_print_options",
+  {
+    title: "Beleg-individuelle Druckoptionen setzen",
+    description:
+      "Setzt die Beleg-individuelle Ueberschreibung der globalen Druckoptionen (§36) fuer eine Rechnung/Gutschrift (kind=INVOICE), ein Angebot/eine Auftragsbestaetigung (kind=QUOTE) oder einen Lieferschein (kind=DELIVERY_NOTE). Nur erlaubt, solange der Beleg im Entwurf (DRAFT) ist. Nur die uebergebenen Felder werden gesetzt (Ersatz der bisherigen Ueberschreibung, kein Merge).",
+    inputSchema: {
+      kind: z.enum(["INVOICE", "QUOTE", "DELIVERY_NOTE"]),
+      id: z.string().min(1),
+      options: printOptionsOverrideSchema,
+    },
+  },
+  async ({ kind, id, options }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const saved = await setPrintOptions(org.id, { kind, id }, options);
+      return ok(`Druckoptionen fuer ${kind} "${id}" gespeichert: ${JSON.stringify(saved)}`);
+    } catch (e) {
+      if (e instanceof z.ZodError) return fail(`Validierung fehlgeschlagen: ${e.issues.map((i) => i.message).join("; ")}`);
+      if (e instanceof NotFoundError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── update_dunning_settings ────────────────────────────────────────────────────
+server.registerTool(
+  "update_dunning_settings",
+  {
+    title: "Mahnwesen-Einstellungen aktualisieren",
+    description:
+      "Aktualisiert die org-weiten Mahnwesen-Einstellungen (§26, Nachtrag Phase 7/§55: autoCreate, autoSend, Basiszinssatz, Karenztage). Nicht angegebene Felder bleiben unveraendert.",
+    inputSchema: dunningSettingsInputSchema.partial().shape,
+  },
+  async (args): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const current = await loadDunningSettings(org.id);
+      const saved = await saveDunningSettings(org.id, { ...current, ...args });
+      return ok(`Mahnwesen-Einstellungen gespeichert: ${JSON.stringify(saved)}`);
+    } catch (e) {
+      if (e instanceof z.ZodError) return fail(`Validierung fehlgeschlagen: ${e.issues.map((i) => i.message).join("; ")}`);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── list_dunning_stages ─────────────────────────────────────────────────────────
+server.registerTool(
+  "list_dunning_stages",
+  {
+    title: "Mahnstufen auflisten",
+    description: "Listet alle Mahnstufen der Organisation, aufsteigend nach Reihenfolge (Nachtrag Phase 7/§55).",
+    inputSchema: {},
+  },
+  async (): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const stages = await listDunningStages(org.id);
+      return ok(JSON.stringify(stages, null, 2));
+    } catch (e) {
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── update_dunning_stage ────────────────────────────────────────────────────────
+server.registerTool(
+  "update_dunning_stage",
+  {
+    title: "Mahnstufe aktualisieren",
+    description:
+      "Aktualisiert eine bestehende Mahnstufe (Name/Fristen/Mahnkosten/Zinsen/Pauschale/Auto-Versand/aktiv). Mahnkosten sind erst ab der 3. Stufe zulaessig (order >= 2, COMPLIANCE §12). Nicht angegebene Felder bleiben unveraendert (Merge mit dem aktuellen Stand). Nachtrag Phase 7/§55.",
+    inputSchema: {
+      id: z.string().describe("Mahnstufen-ID"),
+      ...dunningStageFieldsSchema.partial().shape,
+    },
+  },
+  async ({ id, ...args }): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const existing = await dbInternal.dunningStage.findFirst({ where: { id, orgId: org.id } });
+      if (!existing) return fail(`Mahnstufe "${id}" nicht gefunden.`);
+      const merged = {
+        name: args.name ?? existing.name,
+        daysAfterDue: args.daysAfterDue ?? existing.daysAfterDue,
+        newDueDays: args.newDueDays ?? existing.newDueDays,
+        feeCents: args.feeCents ?? existing.feeCents,
+        calculateInterest: args.calculateInterest ?? existing.calculateInterest,
+        includeB2BFlatFee: args.includeB2BFlatFee ?? existing.includeB2BFlatFee,
+        emailTemplateId: args.emailTemplateId !== undefined ? args.emailTemplateId : existing.emailTemplateId,
+        autoSend: args.autoSend ?? existing.autoSend,
+        enabled: args.enabled ?? existing.enabled,
+      };
+      const saved = await updateDunningStage(org.id, id, merged);
+      return ok(`Mahnstufe "${saved.name}" gespeichert: ${JSON.stringify(saved)}`);
+    } catch (e) {
+      if (e instanceof z.ZodError) return fail(`Validierung fehlgeschlagen: ${e.issues.map((i) => i.message).join("; ")}`);
+      if (e instanceof DunningStageError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── update_invoice_draft ─────────────────────────────────────────────────────
+server.registerTool(
+  "update_invoice_draft",
+  {
+    title: "Rechnungsentwurf bearbeiten",
+    description:
+      "Aktualisiert einen Rechnungsentwurf (nur DRAFT — festgeschriebene Rechnungen sind unveraenderbar, GoBD). Nicht angegebene Felder bleiben unveraendert. Wird 'lines' angegeben, werden ALLE Positionen ersetzt; lineType erlaubt Ueberschriften/Textbloecke/Zwischensummen (HEADING/TEXT/SUBTOTAL, tragen nie einen Betrag).",
+    inputSchema: {
+      invoice: z.string().describe("Rechnungsnummer oder ID"),
+      subject: z.string().optional().describe("Betreff"),
+      orderNumber: z.string().optional().describe("Bestellnummer (BT-13)"),
+      internalReference: z.string().optional(),
+      buyerReference: z.string().optional().describe("Leitweg-ID-Override (BT-10)"),
+      notes: z.string().optional(),
+      internalNotes: z.string().optional().describe("Nur intern sichtbar, erscheint nie im Beleg/E-Mail"),
+      paymentTerms: z.string().optional(),
+      dueDate: z.string().optional().describe("YYYY-MM-DD oder 'heute'"),
+      deliveryDate: z.string().optional().describe("YYYY-MM-DD oder 'heute'"),
+      lines: z
+        .array(
+          z.object({
+            lineType: LineType.default("ITEM"),
+            description: z.string(),
+            descriptionLong: z.string().optional().describe("Rich-Text-Langbeschreibung (Markdown-Teilmenge)"),
+            articleNumber: z.string().optional(),
+            quantity: z.number().optional().describe("Menge (Pflicht bei ITEM)"),
+            unitPriceEuro: z.number().optional(),
+            productName: z.string().optional(),
+            unit: z.string().optional(),
+            taxRatePercent: z.union([z.literal(19), z.literal(7), z.literal(0)]).optional(),
+            discountPercent: z.number().min(0).max(100).optional(),
+            discountAmount: z.number().min(0).optional(),
+          }),
+        )
+        .optional(),
+    },
+  },
+  async (args): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const inv = await resolveInvoice(org.id, args.invoice);
+      const patch: Record<string, unknown> = {};
+      if (args.subject !== undefined) patch.subject = args.subject;
+      if (args.orderNumber !== undefined) patch.orderNumber = args.orderNumber;
+      if (args.internalReference !== undefined) patch.internalReference = args.internalReference;
+      if (args.buyerReference !== undefined) patch.buyerReference = args.buyerReference;
+      if (args.notes !== undefined) patch.notes = args.notes;
+      if (args.internalNotes !== undefined) patch.internalNotes = args.internalNotes;
+      if (args.paymentTerms !== undefined) patch.paymentTerms = args.paymentTerms;
+      if (args.dueDate !== undefined) patch.dueDate = parseDateInput(args.dueDate);
+      if (args.deliveryDate !== undefined) patch.deliveryDate = parseDateInput(args.deliveryDate);
+      if (args.lines) patch.lines = await buildEditorLines(org.id, args.lines);
+
+      const updated = await updateDraftInvoice(org.id, inv.id, patch, "mcp");
+      return ok(`Entwurf aktualisiert: ${updated.number ?? "Entwurf " + updated.id.slice(0, 8)} · Netto ${formatCents(updated.netTotalCents)} · Brutto ${formatCents(updated.grossTotalCents)}.`);
+    } catch (e) {
+      if (e instanceof InvoiceUpdateError) return fail(e.message);
+      if (e instanceof z.ZodError) return fail(`Validierung fehlgeschlagen: ${e.issues.map((i) => i.message).join("; ")}`);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── add_attachment ───────────────────────────────────────────────────────────
+server.registerTool(
+  "add_attachment",
+  {
+    title: "Beleganhang hochladen",
+    description:
+      "Fuegt einem Beleg (Rechnung/Angebot/Lieferschein/Abo/Mahnung) einen Anhang hinzu. Dateiinhalt als Base64. Gleiche Grenzen/Whitelist wie im UI (10 MB je Datei, 50 MB je Beleg, keine ausfuehrbaren Formate, Magic-Bytes-Pruefung).",
+    inputSchema: {
+      docType: DocRefType,
+      docId: z.string().describe("Belegnummer oder ID"),
+      filename: z.string(),
+      mime: z.string().describe("MIME-Typ, z. B. application/pdf"),
+      contentBase64: z.string().describe("Dateiinhalt Base64-kodiert"),
+    },
+  },
+  async (args): Promise<Result> => {
+    try {
+      // G2: Base64-Laenge VOR dem Dekodieren gegen die Datei-Obergrenze pruefen — ein
+      // riesiger Base64-String wuerde sonst erst vollstaendig in einen Buffer dekodiert
+      // (bis zu ~33 % groesser im Speicher) und danach ERST von addAttachment abgelehnt.
+      // Base64 kodiert 3 Rohbytes in 4 Zeichen -> max. zulaessige Zeichenlaenge =
+      // ceil(MAX_BYTES * 4/3) + 4 (Puffer fuer Padding/Zeilenumbrueche).
+      const maxBase64Length = Math.ceil((MAX_ATTACHMENT_FILE_BYTES * 4) / 3) + 4;
+      if (args.contentBase64.length > maxBase64Length) {
+        return fail(`Anhang ueberschreitet die Groesse von ${MAX_ATTACHMENT_FILE_BYTES / (1024 * 1024)} MB.`);
+      }
+      const org = await requireOrg();
+      const doc = await resolveDocForAttachment(org.id, args.docType, args.docId);
+      const buffer = Buffer.from(args.contentBase64, "base64");
+      const row = await addAttachment(org.id, args.docType, doc.id, { filename: args.filename, mime: args.mime, buffer }, "mcp");
+      return ok(`Anhang gespeichert: ${row.filename} (${(row.sizeBytes / 1024).toFixed(0)} KB). ID: ${row.id}.`);
+    } catch (e) {
+      if (e instanceof AttachmentValidationError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── list_attachments ─────────────────────────────────────────────────────────
+server.registerTool(
+  "list_attachments",
+  {
+    title: "Beleganhaenge auflisten",
+    description: "Listet die Anhaenge eines Belegs.",
+    inputSchema: {
+      docType: DocRefType,
+      docId: z.string().describe("Belegnummer oder ID"),
+    },
+  },
+  async (args): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const doc = await resolveDocForAttachment(org.id, args.docType, args.docId);
+      const rows = await listAttachments(org.id, args.docType, doc.id);
+      if (rows.length === 0) return ok("Keine Anhaenge.");
+      return ok(
+        JSON.stringify(
+          rows.map((r) => ({ id: r.id, filename: r.filename, mime: r.mime, sizeBytes: r.sizeBytes, uploadedAt: r.createdAt.toISOString() })),
+          null,
+          2,
+        ),
+      );
+    } catch (e) {
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
+// ── remove_attachment ────────────────────────────────────────────────────────
+server.registerTool(
+  "remove_attachment",
+  {
+    title: "Beleganhang entfernen",
+    description: "Entfernt einen Anhang von einem Beleg (kein GoBD-Beleg — die Datei ist loeschbar, die Aktion geht ins ChangeLog).",
+    inputSchema: {
+      docType: DocRefType,
+      docId: z.string().describe("Belegnummer oder ID"),
+      attachmentId: z.string(),
+    },
+  },
+  async (args): Promise<Result> => {
+    try {
+      const org = await requireOrg();
+      const doc = await resolveDocForAttachment(org.id, args.docType, args.docId);
+      await removeAttachment(org.id, args.docType, doc.id, args.attachmentId, "mcp");
+      return ok(`Anhang ${args.attachmentId} entfernt.`);
+    } catch (e) {
+      if (e instanceof NotFoundError) return fail(e.message);
+      return fail(`Fehler: ${(e as Error).message}`);
+    }
+  },
+);
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 async function main() {
   const transport = new StdioServerTransport();
@@ -923,7 +2109,11 @@ async function main() {
   console.error("[open-invoice-germany] MCP-Server bereit (stdio).");
 }
 
-main().catch((e) => {
-  console.error("[open-invoice-germany] Fehler:", e);
-  process.exit(1);
-});
+// Nur starten, wenn direkt ausgeführt (nicht beim Import in Unit-Tests).
+const isEntrypoint = process.argv[1] && import.meta.url === `file://${path.resolve(process.argv[1])}`;
+if (isEntrypoint) {
+  main().catch((e) => {
+    console.error("[open-invoice-germany] Fehler:", e);
+    process.exit(1);
+  });
+}
