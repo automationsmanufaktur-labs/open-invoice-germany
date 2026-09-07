@@ -58,4 +58,8 @@ export interface EInvoiceData {
   // BG-3 Vorausgehende Rechnung (für Gutschrift/Korrektur, BT-25/BT-26)
   precedingInvoiceNumber?: string | null;
   precedingInvoiceDate?: Date | null;
+  // Kopf-/Fusstext (Platzhalter bereits aufgeloest) — NUR fuer PDF-Layout, Ruling:
+  // gehen NICHT ins XRechnung-/ZUGFeRD-XML.
+  headerText?: string | null;
+  footerText?: string | null;
 }

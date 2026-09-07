@@ -51,6 +51,22 @@ npm run mcp   # start the MCP server (stdio) / wire it into Claude Code via .mcp
 
 MVP. What works: master data/customers/products, quotes & invoices, draft → finalise → cancel, partial credit notes, **payments + dunning (§ 288 BGB)**, **recurring invoices/subscriptions**, PDF + **XRechnung + ZUGFeRD** export, GoBD number range + audit. On the roadmap: DATEV/CSV export, B2G/Leitweg-ID EAS codes, OSS/ZM, multi-user, built-in scheduler. See [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) (MVP / stage 2 / stage 3) and the honest list of **[known limitations](docs/LIMITATIONEN.md)**.
 
+## Documents workflow
+
+Quote → order confirmation → delivery note → invoice, all linked:
+
+1. Create a **quote** (draft, editable), send it — status moves `DRAFT → SENT`.
+2. Mark it `ACCEPTED` (or convert it straight into an **order confirmation**).
+3. **Convert** it into a **delivery note** (quantities from the quote/order, over-delivery blocked) and/or into an **invoice draft**.
+4. Every conversion is recorded as a document relation; the **document chain** (visible on every quote/invoice/delivery-note page) shows the full lineage — quote → order confirmation → delivery note → invoice → payments/dunnings.
+5. Billing status (none/partial/full) is derived from those relations, not stored.
+
+Same tools via MCP: `convert_document`, `create_delivery_note`, `set_document_status`, `duplicate_document`. Details: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md), limitations: [docs/LIMITATIONEN.md](docs/LIMITATIONEN.md).
+
+### Let customers accept quotes online
+
+On a quote's detail page (**Documents → quote**), under "Acceptance link", generate a link — the URL is shown **once** (copy button), and can't be retrieved again afterwards. The customer opens it without logging in, sees the quote and a PDF download, and can accept or reject it (name required, email/comment optional). On decision: status `ACCEPTED`/`REJECTED`, an internal notification email, and — depending on the setting under **Settings → Documents** — an automatic order confirmation or invoice draft. The link can be revoked at any time. For the `{{offer.link}}` placeholder in the quote email template, set `APP_BASE_URL` (`.env`) — otherwise it stays empty.
+
 ## Tech stack
 
 Next.js 16 (App Router) · TypeScript (strict) · Prisma 6 · SQLite/PostgreSQL · TailwindCSS · Zod · Vitest.
@@ -79,7 +95,72 @@ cp .env.example .env            # switch DATABASE_URL to the postgresql:// line
 docker compose up --build
 ```
 
-`docker-compose.yml` starts the app + PostgreSQL + the **Mustang** sidecar (XRechnung/ZUGFeRD generation & validation). The Postgres schema lives in `prisma/schema.postgres.prisma` (model-identical, only a different datasource).
+**Upgrading an existing instance.** If the database was created with an older
+version using `prisma db push`, it has no migration history. The container will
+refuse to start and print the one command needed. Take a backup first.
+
+**Do not run `migrate resolve` blindly.** The `0_init` baseline reflects the
+current schema, including `RecurringInvoice`, `RecurringInvoiceLine` and
+`Invoice.recurringInvoiceId`. An older instance may predate these tables. If you
+mark the baseline as applied without checking, Prisma believes the schema is
+complete and later queries fail with `column ... does not exist`. Verify first:
+
+```bash
+docker compose run --rm app \
+  npx prisma migrate diff --from-url "$DATABASE_URL" \
+    --to-schema-datamodel prisma/schema.postgres.prisma --script
+```
+
+**Important:** `--to-schema-datamodel` compares against the current model
+(head), not against the `0_init` baseline. The baseline reference is
+`prisma/migrations-postgres/0_init/migration.sql` only. The diff can therefore
+also show tables or columns that were only introduced by a **later** migration
+under `prisma/migrations-postgres/` (e.g. the phase-0 snapshot columns) — those
+must **not** be applied by hand; `migrate deploy` applies them automatically
+after the `resolve` step. To tell which migration introduces a given column,
+run `grep -l "<column name>" prisma/migrations-postgres/*/migration.sql`: if it
+only appears in `0_init`, it belongs to the baseline; if it (also) appears in a
+later migration, it came from there and must not be created by hand.
+
+- **Empty output** (only the comment "This is an empty migration"): the database
+  already matches the baseline. `migrate resolve --applied 0_init` below is safe.
+- **Output contains only `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN` /
+  `CREATE INDEX` / `ALTER TABLE … ADD CONSTRAINT` (foreign keys)**: apply only
+  the statements that belong to `0_init` (see the `grep` rule above); leave out
+  statements for columns/tables that come from later migrations. Review the
+  remaining SQL, apply it with `docker compose run --rm app npx prisma db
+  execute --url "$DATABASE_URL" --stdin`, then continue with `migrate resolve`.
+- **Output contains any `DROP`**: stop. Do not apply it and do not run
+  `migrate resolve`. The database holds data the baseline does not account for —
+  get a second opinion before proceeding.
+
+Once the diff is clean (or has been applied):
+
+```bash
+docker compose run --rm app \
+  npx prisma migrate resolve --config prisma.postgres.config.ts --applied 0_init
+```
+
+After that the container starts normally and future schema changes go through
+`prisma migrate deploy`.
+
+**If a migration entry in `_prisma_migrations` is marked failed**, `migrate
+deploy` refuses to proceed and the container will not start. This is intentional
+(fail-closed) rather than silently continuing on an uncertain schema. Check what
+the migration partially applied, then resolve it with `prisma migrate resolve
+--rolled-back <name>`.
+
+`docker-compose.yml` starts the app + PostgreSQL. The **Mustang** sidecar (XRechnung/ZUGFeRD generation & validation) is an optional, commented-out block (`einvoice-service/` is not shipped) — see the section above. The Postgres schema lives in `prisma/schema.postgres.prisma` (model-identical, only a different datasource).
+
+## Sending emails (E-Mail-Versand einrichten)
+
+SMTP only — no built-in Resend/SES integration (see [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md)). Steps:
+
+1. Go to **Einstellungen → E-Mail-Versand** and enter your SMTP host, port, security mode, credentials, and sender address.
+2. `AUTH_SECRET` (see `.env.example`) also serves as the encryption key for the stored SMTP password — set it before configuring mail, and re-enter the password if you ever rotate `AUTH_SECRET`.
+3. Click **Testmail senden** to verify the configuration before using it on real documents.
+4. Under **Einstellungen → Vorlagen**, adjust the built-in email templates (subject/body/signature) per document type, or add your own; placeholders like `{{document.number}}` are listed in the editor.
+5. Sending is currently plain text only, with no delivery/bounce tracking (status stays `SENT`) — see [docs/LIMITATIONEN.md](docs/LIMITATIONEN.md) for the full list of email limitations.
 
 ## Tests
 

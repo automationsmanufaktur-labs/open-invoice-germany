@@ -68,8 +68,16 @@ export function renderInvoicePdf(data: EInvoiceData): Promise<Buffer> {
     if (data.dueDate) doc.text(`Fällig am: ${deDate(data.dueDate)}`, { align: "right" });
     if (data.buyer.vatId) doc.text(`USt-IdNr. Empfänger: ${data.buyer.vatId}`, { align: "right" });
 
-    // Positions-Tabelle
+    // Kopftext (Platzhalter bereits aufgeloest, siehe buildEInvoiceData/buildDocEInvoiceData).
+    // Nach dem Meta-Block, vor der Positions-Tabelle — y danach dynamisch (doc.y), kein
+    // hartes Ueberschreiben, da pdfkit bei langem Text automatisch umbricht/seitenwechselt.
     let y = 220;
+    if (data.headerText) {
+      doc.fontSize(9).fillColor("#333").text(data.headerText, left, y, { width: right - left });
+      y = doc.y + 10;
+    }
+
+    // Positions-Tabelle
     doc.fontSize(9).fillColor("#fff");
     doc.rect(left, y, right - left, 18).fill("#1f2937");
     doc.fillColor("#fff");
@@ -109,6 +117,13 @@ export function renderInvoicePdf(data: EInvoiceData): Promise<Buffer> {
     }
     sumRow("Gesamtbetrag", formatCents(data.grossTotalCents, cur), true);
     doc.font("Helvetica");
+
+    // Fusstext (Platzhalter bereits aufgeloest) — nach den Summen, vor notes/paymentTerms.
+    if (data.footerText) {
+      y += 10;
+      doc.fontSize(9).fillColor("#333").text(data.footerText, left, y, { width: right - left });
+      y = doc.y;
+    }
 
     // Pflichthinweise / Zahlungsbedingungen
     y += 16;

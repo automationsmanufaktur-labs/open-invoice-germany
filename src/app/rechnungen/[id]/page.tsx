@@ -1,12 +1,18 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
+import { getActiveOrg } from "@/lib/org";
 import { formatCents, formatQuantity } from "@/lib/money";
 import { StatusBadge } from "@/components/StatusBadge";
 import { finalizeAction, cancelAction } from "@/app/actions/invoices";
 import { PaymentForm } from "@/components/PaymentForm";
 import { DunningButton } from "@/components/DunningButton";
+import { SendEmailDialog } from "@/components/SendEmailDialog";
+import { EmailHistory } from "@/components/EmailHistory";
+import { ConvertMenu } from "@/components/ConvertMenu";
+import { DocumentChain } from "@/components/DocumentChain";
 import { DUNNING_LEVEL_TITLE } from "@/lib/dunning";
+import type { EmailDocType } from "@/schemas/email";
 
 export const dynamic = "force-dynamic";
 
@@ -30,8 +36,11 @@ export default async function InvoiceDetail({
   const { id } = await params;
   const { error } = await searchParams;
 
-  const invoice = await prisma.invoice.findUnique({
-    where: { id },
+  const org = await getActiveOrg();
+  // G7 (Fix-Runde 2): findUnique(id) ohne orgId erlaubte fremden Organisationen den Zugriff
+  // auf eine Rechnungsseite ueber die reine ID — jetzt mandantengeprueft.
+  const invoice = await prisma.invoice.findFirst({
+    where: { id, orgId: org.id },
     include: {
       lines: { orderBy: { position: "asc" } },
       customer: true,
@@ -50,6 +59,7 @@ export default async function InvoiceDetail({
   const dueDate = invoice.dueDate ?? invoice.issueDate;
   const isOverdue = !isDraft && !isCancelled && openCents > 0 && new Date() > dueDate;
   const canPay = !isDraft && !isCancelled && isInvoiceType && openCents > 0;
+  const emailDocType: EmailDocType = invoice.type === "CREDIT_NOTE" ? "CREDIT_NOTE" : "INVOICE";
 
   return (
     <div className="space-y-6">
@@ -62,6 +72,11 @@ export default async function InvoiceDetail({
             {TYPE_TITLE[invoice.type] ?? "Beleg"} {invoice.number ?? "(Entwurf)"}
           </h1>
           <StatusBadge status={invoice.status} />
+          {invoice.snapshotSource === "MIGRATION" && (
+            <span className="inline-block rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+              Adressstand per Migration eingefroren
+            </span>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <a
@@ -89,6 +104,7 @@ export default async function InvoiceDetail({
               ZUGFeRD (PDF)
             </a>
           )}
+          <SendEmailDialog docType={emailDocType} docId={invoice.id} label={isDraft ? "Entwurf per E-Mail senden" : "Per E-Mail senden"} />
           {isDraft && (
             <form action={finalizeAction}>
               <input type="hidden" name="id" value={invoice.id} />
@@ -113,6 +129,7 @@ export default async function InvoiceDetail({
               </button>
             </form>
           )}
+          {!isDraft && !isCancelled && isInvoiceType && <ConvertMenu sourceType="INVOICE" sourceId={invoice.id} showToDeliveryNote />}
         </div>
       </div>
 
@@ -149,6 +166,8 @@ export default async function InvoiceDetail({
           </dl>
         </div>
       </div>
+
+      {invoice.headerText && <p className="whitespace-pre-line text-sm text-slate-700">{invoice.headerText}</p>}
 
       <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
         <table className="w-full text-sm">
@@ -196,7 +215,16 @@ export default async function InvoiceDetail({
         </div>
       </div>
 
+      {invoice.footerText && <p className="whitespace-pre-line text-sm text-slate-700">{invoice.footerText}</p>}
       {invoice.notes && <p className="text-sm text-slate-600">{invoice.notes}</p>}
+
+      {invoice.internalNotes && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <span className="mr-2 font-medium">Interne Notiz</span>
+          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs">nur intern sichtbar</span>
+          <p className="mt-1 whitespace-pre-line">{invoice.internalNotes}</p>
+        </div>
+      )}
 
       {isInvoiceType && !isDraft && !isCancelled && (
         <section className="space-y-4 rounded-lg border border-slate-200 bg-white p-5">
@@ -221,21 +249,28 @@ export default async function InvoiceDetail({
           {invoice.dunnings.length > 0 && (
             <div className="space-y-1 text-sm">
               {invoice.dunnings.map((d) => (
-                <div key={d.id} className="flex items-center justify-between border-t border-slate-100 pt-1 text-slate-600">
+                <div key={d.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-1 text-slate-600">
                   <span>
                     {DUNNING_LEVEL_TITLE[d.level] ?? `${d.level}. Mahnung`} · {d.number} · {deDate(d.sentAt)}
                     {d.interestAmountCents > 0 ? ` · Zinsen ${formatCents(d.interestAmountCents, invoice.currency)}` : ""}
                     {d.flatFee40Cents > 0 ? ` · Pauschale ${formatCents(d.flatFee40Cents, invoice.currency)}` : ""}
                   </span>
-                  <a href={`/api/dunnings/${d.id}/pdf`} target="_blank" className="text-indigo-600 hover:underline">
-                    PDF
-                  </a>
+                  <div className="flex items-center gap-2">
+                    <a href={`/api/dunnings/${d.id}/pdf`} target="_blank" className="text-indigo-600 hover:underline">
+                      PDF
+                    </a>
+                    <SendEmailDialog docType="DUNNING" docId={d.id} label="Mahnung senden" />
+                  </div>
                 </div>
               ))}
             </div>
           )}
         </section>
       )}
+
+      <DocumentChain orgId={org.id} type="INVOICE" id={invoice.id} />
+
+      <EmailHistory docType={emailDocType} docId={invoice.id} />
     </div>
   );
 }
