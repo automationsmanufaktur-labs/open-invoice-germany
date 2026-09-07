@@ -2,9 +2,10 @@
  * Bildet eine festgeschriebene Rechnung (Prisma) auf die framework-freie
  * EInvoiceData-Struktur ab — gemeinsame Quelle für XRechnung- und PDF-Export.
  */
+import { parseSellerSnapshot, parseBuyerSnapshot } from "@/domain/snapshot";
 import type { EInvoiceData, EInvoiceTaxSubtotal } from "./types";
 
-interface MapInput {
+export interface MapInput {
   number: string | null;
   type: string;
   issueDate: Date;
@@ -19,6 +20,10 @@ interface MapInput {
   grossTotalCents: number;
   paidAmountCents: number;
   taxBreakdownJson: string;
+  // Phase 0: Snapshot der Parteien; bei Entwuerfen null -> Live-Relation.
+  sellerSnapshotJson?: string | null;
+  buyerSnapshotJson?: string | null;
+  id?: string;
   org: {
     legalName: string;
     addressLine1: string;
@@ -61,6 +66,9 @@ interface MapInput {
 
 export function buildEInvoiceData(invoice: MapInput): EInvoiceData {
   const breakdown = JSON.parse(invoice.taxBreakdownJson) as EInvoiceTaxSubtotal[];
+  const ctx = invoice.id ?? invoice.number ?? "unbekannt";
+  const org = parseSellerSnapshot(invoice.sellerSnapshotJson, invoice.org, ctx);
+  const customer = parseBuyerSnapshot(invoice.buyerSnapshotJson, invoice.customer, ctx);
 
   return {
     number: invoice.number ?? "ENTWURF",
@@ -70,33 +78,33 @@ export function buildEInvoiceData(invoice: MapInput): EInvoiceData {
     deliveryDate: invoice.deliveryDate,
     currency: invoice.currency,
     // B2G: Leitweg-ID des Kunden als Buyer reference (BT-10), sonst explizit gesetzter Wert.
-    buyerReference: invoice.buyerReference ?? invoice.customer.leitwegId,
+    buyerReference: invoice.buyerReference ?? customer.leitwegId,
     paymentTerms: invoice.paymentTerms,
     notes: invoice.notes,
     seller: {
-      name: invoice.org.legalName,
-      addressLine1: invoice.org.addressLine1,
-      addressLine2: invoice.org.addressLine2,
-      postalCode: invoice.org.postalCode,
-      city: invoice.org.city,
-      countryCode: invoice.org.country,
-      vatId: invoice.org.vatId,
-      taxNumber: invoice.org.taxNumber,
-      email: invoice.org.email,
-      phone: invoice.org.phone,
+      name: org.legalName,
+      addressLine1: org.addressLine1,
+      addressLine2: org.addressLine2,
+      postalCode: org.postalCode,
+      city: org.city,
+      countryCode: org.country,
+      vatId: org.vatId,
+      taxNumber: org.taxNumber,
+      email: org.email,
+      phone: org.phone,
       contactName: null,
-      electronicAddress: invoice.org.electronicAddress,
+      electronicAddress: org.electronicAddress,
     },
     buyer: {
-      name: invoice.customer.name,
-      contactName: invoice.customer.contactName,
-      addressLine1: invoice.customer.addressLine1,
-      addressLine2: invoice.customer.addressLine2,
-      postalCode: invoice.customer.postalCode,
-      city: invoice.customer.city,
-      countryCode: invoice.customer.countryCode,
-      vatId: invoice.customer.vatId,
-      email: invoice.customer.email,
+      name: customer.name,
+      contactName: customer.contactName,
+      addressLine1: customer.addressLine1,
+      addressLine2: customer.addressLine2,
+      postalCode: customer.postalCode,
+      city: customer.city,
+      countryCode: customer.countryCode,
+      vatId: customer.vatId,
+      email: customer.email,
     },
     lines: invoice.lines.map((l) => ({
       id: l.id,
@@ -114,8 +122,8 @@ export function buildEInvoiceData(invoice: MapInput): EInvoiceData {
     grossTotalCents: invoice.grossTotalCents,
     payableCents: invoice.grossTotalCents - invoice.paidAmountCents,
     paidCents: invoice.paidAmountCents,
-    iban: invoice.org.iban,
-    bic: invoice.org.bic,
-    bankName: invoice.org.bankName,
+    iban: org.iban,
+    bic: org.bic,
+    bankName: org.bankName,
   };
 }

@@ -19,6 +19,7 @@ import { z } from "zod";
 
 import { dbInternal } from "@/lib/db";
 import { getActiveOrg } from "@/lib/org";
+import { ensureOrgMasterdata } from "@/domain/masterdata/ensure";
 import { roundHalfUp, formatCents } from "@/lib/money";
 import { defaultCategoryForScheme } from "@/lib/tax";
 import { SCHEME_NOTICE } from "@/domain/invoice/mandatory";
@@ -38,7 +39,7 @@ import { buildXRechnungUBL } from "@/lib/einvoice/xrechnung";
 import { renderZugferdPdf } from "@/lib/einvoice/zugferd";
 import { validateXRechnung } from "@/lib/einvoice/en16931-core";
 import { renderInvoicePdf } from "@/lib/pdf/invoice-pdf";
-import { organizationSchema, customerSchema, createInvoiceSchema, createDocumentSchema, recordPaymentSchema, createRecurringSchema, TaxScheme } from "@/schemas";
+import { organizationSchema, customerSchema, createInvoiceSchema, createDocumentSchema, recordPaymentSchema, createRecurringSchema, TaxScheme, PaymentMethod } from "@/schemas";
 
 // ── Helfer ────────────────────────────────────────────────────────────────
 type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -200,6 +201,8 @@ server.registerTool(
       const org = existing
         ? await dbInternal.organization.update({ where: { id: existing.id }, data })
         : await dbInternal.organization.create({ data });
+      // idempotent, deshalb unabhaengig von Create/Update sicher aufrufbar
+      await ensureOrgMasterdata(dbInternal, org.id);
       return ok(`Unternehmen ${existing ? "aktualisiert" : "angelegt"}: ${org.legalName} (${org.id}).`);
     } catch (e) {
       return fail(`Konnte Unternehmen nicht speichern: ${(e as Error).message}`);
@@ -738,7 +741,7 @@ server.registerTool(
     inputSchema: {
       invoice: z.string().describe("Rechnungs-ID oder -Nummer"),
       amountEuro: z.number().describe("Gezahlter Betrag in Euro"),
-      method: z.enum(["TRANSFER", "CASH", "CARD", "SEPA"]).default("TRANSFER"),
+      method: PaymentMethod.default("TRANSFER"),
       reference: z.string().optional(),
     },
   },

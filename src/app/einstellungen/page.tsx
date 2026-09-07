@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { dbInternal } from "@/lib/db";
 import { OrganizationForm } from "@/components/forms/OrganizationForm";
+import { SettingsTabs } from "@/components/SettingsTabs";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,7 @@ export default async function EinstellungenPage({ searchParams }: { searchParams
 
   return (
     <div className="space-y-6">
+      <SettingsTabs active="stammdaten" />
       <h1 className="text-2xl font-bold tracking-tight">Stammdaten</h1>
 
       {saved && (

@@ -18,11 +18,22 @@ Damit niemand böse Überraschungen erlebt: Das hier ist (noch) **nicht** abgede
 - **Mahnwesen** vorhanden: Zahlungseingänge erfassen, gestufte Mahnungen (Zahlungserinnerung → 1./2. Mahnung) mit Verzugszins (§ 288 BGB, taggenau) + 40-€-Pauschale (nur B2B, einmal). Der **Basiszinssatz ist als Default hinterlegt** (1,27 % für 2026) und muss zum jeweiligen Halbjahr gepflegt/übergeben werden — keine automatische Aktualisierung.
 - **Wiederkehrende Rechnungen/Abos** vorhanden: Vorlage mit Rhythmus (wöchentlich–jährlich), optional Auto-Festschreiben. Der Lauf erzeugt fällige Rechnungen — manuell (UI/MCP) oder per Cron (`npm run recurring:run`, bzw. `GET /api/cron/run-recurring` mit `CRON_SECRET`). Es gibt **keinen eingebauten Scheduler**; der Cron-/Timer-Aufruf muss self-hosted eingerichtet werden. Mengen/Preise sind je Lauf fix (keine nutzungsbasierte Abrechnung).
 
+## E-Mail-Versand
+- **Nur SMTP.** Es gibt genau einen Provider (`src/lib/mail/smtp.ts`); Resend/SES o. Ä. sind nicht angebunden (siehe `docs/ARCHITEKTUR.md`).
+- **Kein Zustell-/Bounce-Tracking.** Der Versandstatus bleibt nach erfolgreichem SMTP-Aufruf dauerhaft `SENT` — die Werte `DELIVERED`/`BOUNCED` sind im Schema reserviert, werden aber mangels Provider-Webhook nicht gesetzt.
+- **QUEUED-Eintraege ohne Abgleich.** Bricht der Prozess waehrend des SMTP-Versands ab, bleibt der `EmailLog`-Eintrag dauerhaft auf `QUEUED` stehen, ohne dass ein ChangeLog-Satz nachgezogen wird; ein Abgleich (Scheduler) folgt in Phase 6.
+- **Nur Text/plain**, kein HTML-Mailversand.
+- **Lieferschein-Versand** ist noch nicht angebunden (kein PDF-Rendering für `DELIVERY_NOTE`); folgt mit der Lieferschein-UI in Phase 3.
+- **`AUTH_SECRET`-Wechsel invalidiert das gespeicherte SMTP-Passwort** (Verschlüsselung per HKDF aus `AUTH_SECRET`, siehe `src/lib/crypto/secrets.ts`) — nach einem Secret-Wechsel muss das Passwort in den Mail-Einstellungen neu eingetragen werden.
+- **Zusatzanhänge werden nicht persistiert.** Im `EmailLog` werden nur Dateiname, Größe und SHA-256-Hash protokolliert, nicht der Dateiinhalt.
+
 ## Daten & Recht
-- **PostgreSQL** nutzt im Docker-Setup vorerst `prisma db push` (eigene Postgres-Migrationen sind Roadmap). Solo/SQLite nutzt echte Migrationen.
+- **PostgreSQL** nutzt echte Migrationen (`prisma/migrations-postgres/`, angewendet beim Containerstart). Bestehende Instanzen, die noch mit `prisma db push` angelegt wurden, müssen einmalig eine Baseline verbuchen — der Container bricht mit der nötigen Anweisung ab, statt die Datenbank anzufassen.
 - **Nummernkreise** sind standardmäßig jahresbasiert; eine UI zum Vorkonfigurieren (Präfix/Muster/jahresunabhängig) fehlt noch.
 - **Feld-Validierung** von IBAN/BIC/USt-IdNr. ist bewusst locker (keine Prüfziffer/Mod-97). Offensichtlich falsche Werte können durchrutschen.
 - **GoBD:** Die Software ermöglicht Unveränderbarkeit + Audit-Chain, ersetzt aber **nicht** die anwenderseitige **Verfahrensdokumentation**.
+- **Beleg-Snapshots:** Seit Phase 0 speichern festgeschriebene Rechnungen und nummerierte Geschäftsdokumente Käufer-/Verkäuferdaten als Snapshot; Stammdatenänderungen wirken nicht mehr zurück. Belege aus der Zeit davor wurden per Migration aus dem damals aktuellen Stamm eingefroren (`snapshotSource = MIGRATION`) — ihr Snapshot entspricht dem Stand zum Migrationszeitpunkt, nicht zwingend dem Ausstellungszeitpunkt. Storno und Gutschrift erben den Snapshot des Originalbelegs (`INHERITED`). **Mahnungen** werden noch nicht gesnapshottet — der PDF-Nachdruck einer Mahnung liest weiterhin den aktuellen Stamm (Organisation/Kunde) live; das folgt erst in Phase 6 (Mahnwesen).
+- **Phase 1:** Verknüpfungen zwischen Belegen (Umwandlung, Storno, Gutschrift, Abo-Erzeugung) werden zusätzlich in `DocumentRelation` gespiegelt; Zahlungsmethoden und Mahnstufen sind Stammdaten (noch ohne UI, Phasen 4/6); Lieferscheine existieren als Datenmodell + Service, UI folgt in Phase 3.
 
 ## Funktionsumfang (geplant)
 DATEV-/CSV-Export, OSS/ZM, USt-Voranmeldungs-Auswertung, VIES-Prüfung, Mehrbenutzer/Auth, eingebauter Scheduler, nutzungsbasierte Abo-Abrechnung.
