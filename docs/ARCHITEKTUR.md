@@ -1,8 +1,14 @@
 # ARCHITEKTUR-Vorschlag: Open-Source-Rechnungssoftware DE
 
-> Begleitdokument zu `COMPLIANCE.md`. Stand: 2026-06-09. Entscheidungsvorschlag zur Freigabe — noch nicht implementiert.
+> **Stand 2026-09-02.** Dieses Dokument beschreibt den **implementierten** Stand. Frühere
+> Fassungen enthielten Entwurfsvorschläge (Decimal-Preise, Mustang-Sidecar, Dunning-Enum,
+> EmailLog), die nie umgesetzt wurden — sie sind entweder entfernt oder ausdrücklich als
+> historisch gekennzeichnet. Wo Code und Dokument abweichen,
+> gilt der Code. Roadmap: `docs/superpowers/requirements/` (Branch `specs`).
 
-Stack (fix): Next.js 14 App Router · TS strict · Prisma · PostgreSQL (Docker) / SQLite-Solo · Tailwind · Zod an jedem Boundary · React Hook Form. Rechtlicher Rahmen: §14/§14a/§19/§14b UStG, §§33/34/34a UStDV, GoBD (§146 AO, §239 HGB), DSGVO.
+> Begleitdokument zu `COMPLIANCE.md`.
+
+Stack (fix): Next.js 16 (App Router) · TS strict · Prisma · PostgreSQL (Docker) / SQLite-Solo · Tailwind · Zod an jedem Boundary · React Hook Form. Rechtlicher Rahmen: §14/§14a/§19/§14b UStG, §§33/34/34a UStDV, GoBD (§146 AO, §239 HGB), DSGVO.
 
 ---
 
@@ -18,34 +24,33 @@ Stack (fix): Next.js 14 App Router · TS strict · Prisma · PostgreSQL (Docker)
 `id` · `orgId` · `type` (BUSINESS | CONSUMER) — steuert §286-Verzugslogik, 40-€-Pauschale, B2B-E-Rechnungspflicht · `name` · `address` · `vatId?` · `vatIdValidatedAt?` (VIES/§18e) · `countryCode` · `leitwegId?` (B2G, BT-10) · `peppolId?` · `defaultPaymentTermsDays` (Default 14) · `isArchived` (Soft-Delete, **kein** Hard-Delete bei Belegbezug)
 
 **Product (Produkt/Leistung)** — Katalog, frei editierbar (kein Beleg)
-`id` · `orgId` · `name` · `description` · `unit` (EN-16931 UN/ECE Rec 20, z.B. `C62`, `HUR`) · `netPrice` (Decimal) · `taxRate` (enum 19/7/0) · `taxCategory` (S | AE | K | G | E | Z — EN-16931 UNTDID 5305) · `differential` (bool, §25a)
+`id` · `orgId` · `name` · `description` · `unit` (EN-16931 UN/ECE Rec 20, z.B. `C62`, `HUR`) · `netPriceCents` (Integer-Cent, kein Decimal) · `taxRate` (Integer-Prozent: 19/7/0) · `taxCategory` (S | AE | K | G | E | Z — EN-16931 UNTDID 5305) · `differential` (bool, §25a)
 
 **NumberRange (Nummernkreis)** — eigene Tabelle, transaktionaler Zähler
 `id` · `orgId` · `docType` (QUOTE | INVOICE | CREDIT_NOTE | DUNNING) · `prefix` · `pattern` (z.B. `RE-{YYYY}-{SEQ:5}`) · `year?` (für jahresbasierte Kreise) · `currentValue` (Int) · `@@unique([orgId, docType, year])`
 
 **Quote (Angebot)** — kein Beleg i.S.d. GoBD, frei editier-/löschbar
-`id` · `orgId` · `customerId` · `number` · `status` (DRAFT | SENT | ACCEPTED | DECLINED | EXPIRED) · `validUntil` · `lines[]` · Summenfelder · `convertedToInvoiceId?`
+`id` · `orgId` · `customerId` · `kind` (ANGEBOT | AUFTRAGSBESTAETIGUNG | PROFORMA) · `number?` · `status` (DRAFT | SENT | ACCEPTED | DECLINED | EXPIRED | CONVERTED) · `validUntil` · `lines[]` · Summenfelder (`…Cents`) · `internalNotes?` (nur intern, nie in PDF/Mail) · `sellerSnapshotJson?` / `buyerSnapshotJson?` / `snapshotSource?` / `snapshotAt?` (Phase 0, siehe Invoice) · `convertedToInvoiceId?`
 
 **Invoice (Rechnung)** — der GoBD-relevante Beleg
-`id` · `orgId` · `customerId` · `number?` (NULL bis Festschreibung) · **`status`** (DRAFT | FINALIZED | SENT | PAID | PARTIALLY_PAID | CANCELLED) · `type` (INVOICE | CREDIT_NOTE | CORRECTION) · `taxScheme` · `issueDate` · `deliveryDate`/`deliveryPeriod` (§14 Abs.4 Nr.6) · `dueDate` · `currency` · `lines[]` · `netTotal` · `taxBreakdown` (JSON: pro Satz Netto/Steuer) · `grossTotal` · `paidAmount` · `notes` (Skonto-Freitext §14.5(19), Reverse-Charge-/§25a-Hinweis) · `consumerRetentionHint` (bool, §14b Abs.1 S.5) · `reversedByInvoiceId?` / `correctsInvoiceId?` · `xmlFormat?` (XRECHNUNG | ZUGFERD) · `xmlHash?` · `pdfPath?` · `finalizedAt?` · `createdAt`
+`id` · `orgId` · `customerId` · `number?` (NULL bis Festschreibung) · **`status`** (DRAFT | FINALIZED | SENT | PAID | PARTIALLY_PAID | CANCELLED) · `type` (INVOICE | CREDIT_NOTE | CORRECTION) · `taxScheme` · `issueDate` · `deliveryDate`/`deliveryStart`/`deliveryEnd` (§14 Abs.4 Nr.6) · `dueDate` · `currency` · `lines[]` · `netTotalCents` · `taxBreakdownJson` (JSON: pro Satz Netto/Steuer) · `grossTotalCents` · `paidAmountCents` · `notes` (Skonto-Freitext §14.5(19), Reverse-Charge-/§25a-Hinweis) · `internalNotes?` (nur intern sichtbar — nie in PDF, XRechnung, ZUGFeRD oder Mails) · `sellerSnapshotJson?` / `buyerSnapshotJson?` (Käufer-/Verkäufer-Snapshot zum Festschreibungs-/Erstellungszeitpunkt, Phase 0; JSON, per Zod gelesen) · `snapshotSource?` (FINALIZE | CREATE | MIGRATION) · `snapshotAt?` · `consumerRetentionHint` (bool, §14b Abs.1 S.5) · `reversedByInvoiceId?` / `correctsInvoiceId?` · `xmlFormat?` (XRECHNUNG | ZUGFERD) · `xmlHash?` · `pdfPath?` · `finalizedAt?` · `createdAt`
 
 **InvoiceLine (Rechnungsposition)**
-`id` · `invoiceId` · `position` · `productId?` (Snapshot — kein Live-Lookup) · `description` · `quantity` · `unit` · `unitNetPrice` · `taxRate` · `taxCategory` · `discount?` · `lineNetTotal`
-→ Alle steuer-/preisrelevanten Werte werden bei Festschreibung **eingefroren** (Snapshot), nie per Relation auf den Live-Katalog aufgelöst.
+`id` · `invoiceId` · `position` · `productId?` (Snapshot — kein Live-Lookup) · `description` · `quantityMilli` (Integer-Milliunits, 1/1000) · `unit` · `unitNetPriceCents` (Integer-Cent) · `taxRate` (Integer-Prozent) · `taxCategory` · `discountPermille?` · `lineNetCents`
+→ Alle steuer-/preisrelevanten Werte werden bei Festschreibung **eingefroren** (Snapshot), nie per Relation auf den Live-Katalog aufgelöst. Kein `Decimal`-Typ im Schema (siehe `prisma/schema.prisma`-Kopfkommentar).
 
 **Payment (Zahlung)**
-`id` · `invoiceId` · `amount` · `paidAt` · `method` (TRANSFER | CASH | CARD | SEPA) · `reference` · `isSkonto` (bool — §17-Fall, **keine** Rechnungsberichtigung nötig) · `createdAt`
+`id` · `invoiceId` · `amountCents` · `paidAt` · `method` (TRANSFER | CASH | CARD | SEPA) · `reference` · `isSkonto` (bool — §17-Fall, **keine** Rechnungsberichtigung nötig) · `createdAt`
 
 **Dunning (Mahnung)**
-`id` · `invoiceId` · `level` (REMINDER=0 | DUNNING_1 | DUNNING_2) · `sentAt` · `dueDate` · `baseInterestRate` (Snapshot Basiszins zum Verzugsstichtag) · `interestRate` (5 oder 9 Pp, abhängig `Customer.type`) · `interestAmount` · `lateFee?` (nur konkrete Porto-/Materialkosten, **nicht** Pauschale) · `flatFee40?` (nur `type=BUSINESS`, §288 Abs.5) · `pdfPath?`
+`id` · `invoiceId` · `level` (`Int`, kein Enum: 0 = Zahlungserinnerung, 1 = 1. Mahnung, 2 = 2. Mahnung, 3 = 3. Mahnung — Titel in `src/lib/dunning.ts`) · `sentAt` · `dueDate` · `baseInterestRatePermille?` (Snapshot Basiszins zum Verzugsstichtag) · `interestRatePoints?` (5 oder 9 Pp, abhängig `Customer.type`) · `interestAmountCents` · `lateFeeCents` (nur konkrete Porto-/Materialkosten, **nicht** Pauschale) · `flatFee40Cents` (nur `type=BUSINESS`, §288 Abs.5) · `pdfPath?`
 → Verzugslogik: Level-0-Erinnerung kostenfrei (verzugsbegründend, h.M. nicht ersatzfähig); ab Level-1 Verzugsschaden.
 
 **ChangeLog (append-only Änderungsprotokoll)** — GoBD-Kern
 `id` · `orgId` · `entity` (INVOICE | PAYMENT | …) · `entityId` · `action` (CREATE | UPDATE | FINALIZE | CANCEL | DELETE_PRE_FINALIZE) · `actorId` · `at` · `diff` (JSON: alte→neue Werte) · `prevHash` · `hash`
 → Append-only: **kein** UPDATE/DELETE-Recht (DB-User ohne diese Grants + App-Layer), Hash-Chain (`hash = sha256(prevHash + canonical(diff))`) macht Manipulation erkennbar.
 
-**EmailLog** — Versandprotokoll (Resend o.ä.)
-`id` · `orgId` · `invoiceId?`/`dunningId?` · `template` · `to` · `status` (QUEUED | SENT | DELIVERED | BOUNCED) · `providerId` · `sentAt` · `error?`
+**EmailLog** — existiert **nicht**. Ein Versandprotokoll (Resend o.ä.) ist geplant (Phase 1), aber im aktuellen Schema (`prisma/schema.prisma`) nicht vorhanden.
 
 ### GoBD-Unveränderbarkeit + lückenloser Nummernkreis — technisch erzwungen
 
@@ -76,7 +81,7 @@ Stack (fix): Next.js 14 App Router · TS strict · Prisma · PostgreSQL (Docker)
 ### Anforderung
 EN-16931-konform: **XRechnung** (UBL oder CII, reines XML) und **ZUGFeRD/Factur-X** (PDF/A-3 mit eingebettetem CII-XML, Profil ≥ EN16931/COMFORT — **niemals** MINIMUM/BASIC-WL, gelten nicht als E-Rechnung). Bei Hybrid ist der XML-Teil führend (BMF 15.10.2025) → 14c-Risiko bei Divergenz, daher PDF deterministisch aus denselben Daten rendern.
 
-### Optionen bewertet
+### Optionen bewertet (historische Abwägung 2026-06 — nicht umgesetzt, siehe unten)
 
 | Schicht | Optionen | Bewertung |
 |---|---|---|
@@ -84,17 +89,18 @@ EN-16931-konform: **XRechnung** (UBL oder CII, reines XML) und **ZUGFeRD/Factur-
 | **PDF/A-3-Embedding** | reine Node-PDF-Libs · Mustang/horstoeko | Node-Ökosystem für korrektes PDF/A-3 (XMP, ICC, AFRelationship) **dünn** → hohes Risiko formal ungültiger Container. |
 | **Validierung CI/Test** | **KoSIT-Validator** (Java, offizielle Referenz) + `validator-configuration-xrechnung` · **veraPDF** (PDF/A-3) | De-facto-Standard. Zwei Ebenen: KoSIT = XML/Schematron, veraPDF = PDF/A-Container. Reine JS-Validierung deckt EN-16931-Schematron **nicht** vollständig ab. |
 
-### KLARE EMPFEHLUNG
+### Umgesetzt: eigener Generator (kein JVM-Sidecar)
 
-**JVM-Sidecar-Pattern: Mustangproject als HTTP-Microservice (Docker), aus Next.js per `fetch` angesprochen.**
+Die oben skizzierte Mustang-Sidecar-Empfehlung wurde **nicht** umgesetzt. Stattdessen erzeugt die App die E-Rechnungsformate selbst, ohne JVM-Abhängigkeit zur Laufzeit:
 
-Begründung:
-1. **Ein Tool deckt Erzeugung + PDF/A-3-Embedding + Validierung (inkl. integriertem veraPDF)** ab — minimiert Format-Drift-Risiko und vermeidet das dünne Node-PDF/A-Ökosystem.
-2. **Rechtssicherheit**: Mustang folgt offiziell den ZUGFeRD/XRechnung-Versionen; in CI zusätzlich **KoSIT-Validator** als unabhängige Zweitprüfung (jede generierte Rechnung im Test gegen KoSIT-Config validieren).
-3. **Saubere Trennung**: Next.js bleibt der Datenproduzent (validiertes EN-16931-DTO via Zod), der Sidecar ist reine Render-/Validier-Engine — austauschbar, ohne JVM-Wissen im App-Code.
-4. **Solo-/SQLite-Modus**: Sidecar bleibt optionaler Container; ohne ihn kann die App „sonstige Rechnung" (PDF) ausstellen (für B2C / §33 / §19 zulässig), E-Rechnung wird erst beim Sidecar-Start scharfgeschaltet.
+1. **UBL** (XRechnung 3.0 CIUS) — `src/lib/einvoice/xrechnung.ts`, per `xmlbuilder2`.
+2. **CII** (Factur-X/EN-16931-Profil) — `src/lib/einvoice/cii.ts`, ebenfalls per `xmlbuilder2`; Gutschriften mit positiven Beträgen + TypeCode 381.
+3. **ZUGFeRD-Einbettung** — `src/lib/einvoice/zugferd.ts` bettet das CII-XML per `pdf-lib` als Anhang (`factur-x.xml`, `AFRelationship`) in das PDF ein. **Kein striktes PDF/A-3** (`pdf-lib` erzwingt keine Farbprofil-/XMP-Konformität) — der eingebettete XML-Teil ist führend (BMF 15.10.2025).
+4. **Kernregelprüfung** — `src/lib/einvoice/en16931-core.ts` prüft die wichtigsten EN-16931-Geschäftsregeln lokal, ohne Java.
+5. **Schematron-Validierung in CI** — per SaxonJS (`npm run validate:erechnung`, `scripts/validate-erechnung.ts`), gegen die offiziellen EN-16931/XRechnung-CIUS-Regeln, ohne Java-Laufzeit.
+6. **KoSIT-Validator** (Java) läuft in CI als unabhängiger Cross-Check zusätzlich zu SaxonJS.
 
-**CI-Gate (verpflichtend):** jeder generierte Beleg im Test → KoSIT-Validator + veraPDF; Build rot bei FAIL. Validator-Config + ZUGFeRD-Version als gepinnte Artefakte, Renovate-Update überwacht Drift.
+Damit entfällt der JVM-Sidecar vollständig; die einzige Einschränkung gegenüber der ursprünglichen Empfehlung ist das fehlende strenge PDF/A-3 (siehe `docs/LIMITATIONEN.md`).
 
 ---
 
@@ -118,48 +124,56 @@ Begründung:
 
 ```
 src/
-  app/
-    (app)/
-      rechnungen/        # Invoice-CRUD, Festschreiben, Storno
-      angebote/
-      kunden/
-      produkte/
-      mahnwesen/
-      einstellungen/     # Org, Nummernkreise, Steuer-Schema
-    api/
-      invoices/          # finalize/cancel/erechnung-Endpoints
-      einvoice/          # Sidecar-Proxy (Mustang)
-      validate-vatid/    # §18e/VIES
-  domain/                # framework-frei, testbar
-    invoice/
-      finalize.ts        # transaktionale Festschreibung + Nummernvergabe
-      cancel.ts          # Storno-/Korrektur-Logik
-      tax-calc.ts        # §14/§25a/RC, Brutto/Netto, taxBreakdown
-    dunning/
-      verzug.ts          # §286/§288, Basiszins-Tabelle, 40€-Pauschale
-    numbering/
-      allocate.ts
-    audit/
-      changelog.ts       # Hash-Chain
-  schemas/               # Zod — DTOs, EN-16931-Mapping, API-Boundaries
+  app/                    # Next.js App Router: Routen + api/ + actions/
+    api/                  # auth/, cron/, documents/, dunnings/, invoices/, recurring/
+    actions/              # invoices.ts, masterdata.ts, result.ts (Server Actions)
+    rechnungen/ dokumente/ kunden/ produkte/ abos/ einstellungen/ setup/ login/
+  components/             # UI-Komponenten (12 Dateien), inkl. forms/ (CustomerForm.tsx,
+                           # OrganizationForm.tsx, ProductForm.tsx, fields.tsx)
+  proxy.ts                # Next.js Middleware: Session-Prüfung, öffentliche Pfade (/login, /api/cron, …)
+  domain/                 # framework-frei, testbar
+    audit.ts
+    changelog.ts          # Hash-Chain
+    numbering.ts
+    snapshot.ts           # Käufer-/Verkäufer-Snapshot (Phase 0)
+    document/              # convert.ts, create.ts, pdf-data.ts
+    dunning/                # create.ts
+    invoice/                # cancel.ts, create.ts, credit.ts, finalize.ts, mandatory.ts, payment.ts
+    recurring/              # create.ts, run.ts
   lib/
-    db.ts                # Prisma + append-only-/no-finalized-edit-Middleware
-    einvoice-client.ts   # fetch → Mustang-Sidecar
-    money.ts             # Decimal-Arithmetik
-  emails/                # React-Email Templates
+    db.ts                 # Prisma-Client
+    org.ts
+    money.ts               # Integer-Cent-Arithmetik
+    tax.ts
+    dunning.ts             # §288-Verzugszins, DUNNING_LEVEL_TITLE
+    recurring.ts
+    auth/                  # password.ts, server.ts, session.ts
+    einvoice/               # xrechnung.ts, cii.ts, zugferd.ts, en16931-core.ts, mapper.ts, load.ts, types.ts
+    pdf/                    # invoice-pdf.ts, dunning-pdf.ts
+  schemas/
+    index.ts               # Zod — DTOs, EN-16931-Mapping, API-Boundaries
+  mcp/                     # bootstrap.ts, server.ts
+  generated/prisma/        # generierter Prisma-Client (nicht im Repo versioniert editieren)
 prisma/
-  schema.prisma
-  migrations/
-einvoice-service/        # Dockerfile: Mustang HTTP-Sidecar (Java)
+  schema.prisma            # SQLite (Solo/Dev)
+  schema.postgres.prisma   # PostgreSQL (Docker/Prod)
+  migrations/               # SQLite-Migrationen
+  migrations-postgres/      # PostgreSQL-Migrationen
+scripts/                  # db-prepare.sh, migrate-postgres.sh, test-postgres-migrations.sh,
+                           # validate-erechnung.ts, generate-sample-xrechnung.ts, run-recurring.ts, …
 test/
-  einvoice/              # KoSIT + veraPDF Fixtures (CI-Gate)
-  domain/                # Festschreibung, Nummernkreis, Storno, Verzug
-docker-compose.yml       # postgres + einvoice-service (+ optional resend-mock)
+  unit/
+  integration/
+docker-compose.yml       # db + app für Docker-Betrieb; enthält einen auskommentierten,
+                          # optionalen Mustang-Sidecar-Block (Profil "einvoice", Build-Pfad
+                          # einvoice-service/ existiert nicht) — nicht aktiv genutzt
 ```
 
 ---
 
-## 5. MVP-Schnitt vs. Ausbaustufen
+## 5. Roadmap (historisch)
+
+Die verbindliche Planung ist das Lastenheft; dieser Abschnitt bleibt als ursprüngliche Stufenidee erhalten.
 
 ### MVP (zuerst — deckt den B2C/Solo-/§19-Fall vollständig)
 - **Org-Setup**, Kunden, Produkte, Angebot → Rechnung.

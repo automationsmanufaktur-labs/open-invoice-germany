@@ -36,6 +36,7 @@ export async function convertDocumentToInvoice(documentId: string, opts: { actor
         currency: q.currency,
         issueDate: now,
         notes: q.notes,
+        internalNotes: q.internalNotes,
         netTotalCents: totals.netTotalCents,
         taxTotalCents: totals.taxTotalCents,
         grossTotalCents: totals.grossTotalCents,

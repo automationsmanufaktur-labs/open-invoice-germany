@@ -15,6 +15,8 @@ import { dbInternal } from "@/lib/db";
 import { computeTaxBreakdown } from "@/lib/tax";
 import { defaultPrefix, formatDocumentNumber } from "@/domain/numbering";
 import { appendChangeLog } from "@/domain/audit";
+import { buildSellerSnapshot, buildBuyerSnapshot } from "@/domain/snapshot";
+import type { SnapshotSource } from "@/schemas";
 import { validateMandatoryFields } from "./mandatory";
 
 export class FinalizeError extends Error {
@@ -29,6 +31,14 @@ export interface FinalizeOptions {
   now?: Date;
   /** Kleinbetragsrechnung (§ 33 UStDV, ≤ 250 € brutto) — reduzierte Pflichtangaben. */
   isSmallAmount?: boolean;
+  /**
+   * Storno/Teilgutschrift: Snapshot des Originalbelegs unveraendert uebernehmen statt
+   * aus dem aktuellen Stamm neu zu bauen. Ein Korrekturbeleg (Storno, Teilgutschrift)
+   * berichtigt genau das Original — er muss denselben Empfaenger/Verkaeufer nennen wie
+   * dieses, auch wenn sich die Stammdaten zwischenzeitlich geaendert haben. Nur wirksam,
+   * wenn BEIDE Werte gesetzt sind; sonst greift der bisherige Live-Pfad (Herkunft FINALIZE).
+   */
+  inheritSnapshotFrom?: { sellerSnapshotJson: string | null; buyerSnapshotJson: string | null };
 }
 
 export async function finalizeWithinTx(
@@ -75,6 +85,15 @@ export async function finalizeWithinTx(
     invoice.lines.map((l) => ({ lineNetCents: l.lineNetCents, taxRate: l.taxRate, taxCategory: l.taxCategory })),
   );
 
+  // Parteien-Snapshot (Phase 0): ab jetzt rendern PDF/XML aus diesem Stand.
+  // Storno/Teilgutschrift erben den Snapshot des Originals (siehe FinalizeOptions.inheritSnapshotFrom),
+  // damit der Korrekturbeleg denselben Empfaenger/Verkaeufer nennt wie das Original.
+  const inherited = opts.inheritSnapshotFrom;
+  const canInherit = !!inherited?.sellerSnapshotJson && !!inherited?.buyerSnapshotJson;
+  const sellerSnapshotJson = canInherit ? inherited!.sellerSnapshotJson : JSON.stringify(buildSellerSnapshot(invoice.org));
+  const buyerSnapshotJson = canInherit ? inherited!.buyerSnapshotJson : JSON.stringify(buildBuyerSnapshot(invoice.customer));
+  const snapshotSource: SnapshotSource = canInherit ? "INHERITED" : "FINALIZE";
+
   // 3) Atomarer Status-Claim: nur wenn noch DRAFT. Verhindert unter Nebenläufigkeit
   //    (Postgres READ COMMITTED) doppelte Festschreibung + doppelten Nummern-Verbrauch.
   const claim = await tx.invoice.updateMany({
@@ -87,6 +106,10 @@ export async function finalizeWithinTx(
       taxTotalCents: totals.taxTotalCents,
       grossTotalCents: totals.grossTotalCents,
       taxBreakdownJson: JSON.stringify(totals.breakdown),
+      sellerSnapshotJson,
+      buyerSnapshotJson,
+      snapshotSource,
+      snapshotAt: now,
     },
   });
   if (claim.count === 0) {
@@ -118,7 +141,7 @@ export async function finalizeWithinTx(
     action: "FINALIZE",
     actor,
     at: now,
-    diff: { number, status: "FINALIZED", grossTotalCents: totals.grossTotalCents },
+    diff: { number, status: "FINALIZED", grossTotalCents: totals.grossTotalCents, snapshotSource },
   });
 
   const result = await tx.invoice.findUnique({

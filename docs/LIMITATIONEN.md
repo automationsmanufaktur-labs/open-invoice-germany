@@ -19,10 +19,11 @@ Damit niemand böse Überraschungen erlebt: Das hier ist (noch) **nicht** abgede
 - **Wiederkehrende Rechnungen/Abos** vorhanden: Vorlage mit Rhythmus (wöchentlich–jährlich), optional Auto-Festschreiben. Der Lauf erzeugt fällige Rechnungen — manuell (UI/MCP) oder per Cron (`npm run recurring:run`, bzw. `GET /api/cron/run-recurring` mit `CRON_SECRET`). Es gibt **keinen eingebauten Scheduler**; der Cron-/Timer-Aufruf muss self-hosted eingerichtet werden. Mengen/Preise sind je Lauf fix (keine nutzungsbasierte Abrechnung).
 
 ## Daten & Recht
-- **PostgreSQL** nutzt im Docker-Setup vorerst `prisma db push` (eigene Postgres-Migrationen sind Roadmap). Solo/SQLite nutzt echte Migrationen.
+- **PostgreSQL** nutzt echte Migrationen (`prisma/migrations-postgres/`, angewendet beim Containerstart). Bestehende Instanzen, die noch mit `prisma db push` angelegt wurden, müssen einmalig eine Baseline verbuchen — der Container bricht mit der nötigen Anweisung ab, statt die Datenbank anzufassen.
 - **Nummernkreise** sind standardmäßig jahresbasiert; eine UI zum Vorkonfigurieren (Präfix/Muster/jahresunabhängig) fehlt noch.
 - **Feld-Validierung** von IBAN/BIC/USt-IdNr. ist bewusst locker (keine Prüfziffer/Mod-97). Offensichtlich falsche Werte können durchrutschen.
 - **GoBD:** Die Software ermöglicht Unveränderbarkeit + Audit-Chain, ersetzt aber **nicht** die anwenderseitige **Verfahrensdokumentation**.
+- **Beleg-Snapshots:** Seit Phase 0 speichern festgeschriebene Rechnungen und nummerierte Geschäftsdokumente Käufer-/Verkäuferdaten als Snapshot; Stammdatenänderungen wirken nicht mehr zurück. Belege aus der Zeit davor wurden per Migration aus dem damals aktuellen Stamm eingefroren (`snapshotSource = MIGRATION`) — ihr Snapshot entspricht dem Stand zum Migrationszeitpunkt, nicht zwingend dem Ausstellungszeitpunkt. Storno und Gutschrift erben den Snapshot des Originalbelegs (`INHERITED`). **Mahnungen** werden noch nicht gesnapshottet — der PDF-Nachdruck einer Mahnung liest weiterhin den aktuellen Stamm (Organisation/Kunde) live; das folgt erst in Phase 1.
 
 ## Funktionsumfang (geplant)
 DATEV-/CSV-Export, OSS/ZM, USt-Voranmeldungs-Auswertung, VIES-Prüfung, Mehrbenutzer/Auth, eingebauter Scheduler, nutzungsbasierte Abo-Abrechnung.

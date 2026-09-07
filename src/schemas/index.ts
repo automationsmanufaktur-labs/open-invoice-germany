@@ -27,6 +27,44 @@ export const InvoiceType = z.enum(["INVOICE", "CREDIT_NOTE", "CORRECTION"]);
 export const DocType = z.enum(["QUOTE", "INVOICE", "CREDIT_NOTE", "DUNNING"]);
 export const PaymentMethod = z.enum(["TRANSFER", "CASH", "CARD", "SEPA"]);
 
+// ── Beleg-Snapshots (Phase 0) ────────────────────────────────────────────────
+// Feldgenau identisch mit MapInput.org / MapInput.customer in src/lib/einvoice/mapper.ts.
+// Ein Unit-Test prueft die Schluesselmengen gegeneinander.
+export const SnapshotSource = z.enum(["FINALIZE", "CREATE", "MIGRATION", "INHERITED"]);
+export type SnapshotSource = z.infer<typeof SnapshotSource>;
+
+export const sellerSnapshotSchema = z.object({
+  legalName: z.string(),
+  addressLine1: z.string(),
+  addressLine2: z.string().nullable(),
+  postalCode: z.string(),
+  city: z.string(),
+  country: z.string(),
+  vatId: z.string().nullable(),
+  taxNumber: z.string().nullable(),
+  email: z.string().nullable(),
+  phone: z.string().nullable(),
+  electronicAddress: z.string().nullable(),
+  iban: z.string().nullable(),
+  bic: z.string().nullable(),
+  bankName: z.string().nullable(),
+});
+export type SellerSnapshot = z.infer<typeof sellerSnapshotSchema>;
+
+export const buyerSnapshotSchema = z.object({
+  name: z.string(),
+  contactName: z.string().nullable(),
+  addressLine1: z.string(),
+  addressLine2: z.string().nullable(),
+  postalCode: z.string(),
+  city: z.string(),
+  countryCode: z.string(),
+  vatId: z.string().nullable(),
+  email: z.string().nullable(),
+  leitwegId: z.string().nullable(),
+});
+export type BuyerSnapshot = z.infer<typeof buyerSnapshotSchema>;
+
 // ── Stammdaten ───────────────────────────────────────────────────────────
 export const organizationSchema = z.object({
   legalName: z.string().min(1),
@@ -110,6 +148,7 @@ export const createInvoiceSchema = z.object({
   buyerReference: z.string().optional(),
   notes: z.string().optional(),
   paymentTerms: z.string().optional(),
+  internalNotes: z.string().optional(), // nur intern, nie im Beleg
   lines: z.array(invoiceLineInputSchema).min(1),
 });
 export type CreateInvoiceInput = z.infer<typeof createInvoiceSchema>;
@@ -125,6 +164,7 @@ export const createDocumentSchema = z.object({
   currency: z.string().length(3).default("EUR"),
   validUntil: z.coerce.date().optional(),
   notes: z.string().optional(),
+  internalNotes: z.string().optional(),
   lines: z.array(invoiceLineInputSchema).min(1),
 });
 export type CreateDocumentInput = z.infer<typeof createDocumentSchema>;

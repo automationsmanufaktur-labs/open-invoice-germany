@@ -135,6 +135,11 @@ model Quote {
   currency             String   @default("EUR")
   taxScheme            String   @default("REGULAR")
   notes                String?
+  internalNotes        String?  // Nur intern sichtbar — nie in PDF oder Mails
+  sellerSnapshotJson   String?  // Snapshot zum Erstellungszeitpunkt (Phase 0), siehe Invoice
+  buyerSnapshotJson    String?
+  snapshotSource       String?  // CREATE | MIGRATION
+  snapshotAt           DateTime?
   netTotalCents        Int      @default(0)
   taxTotalCents        Int      @default(0)
   grossTotalCents      Int      @default(0)
@@ -185,6 +190,13 @@ model Invoice {
   buyerReference        String?  // BT-10 / Leitweg-ID (B2G)
   notes                 String?
   paymentTerms          String?  // Skonto-/Zahlungsbedingungen (Freitext, §14 Abs.4 Nr.7)
+  internalNotes         String?  // Nur intern sichtbar — nie in PDF, XRechnung, ZUGFeRD oder Mails
+  // Snapshot der Parteien zum Festschreibungszeitpunkt (Phase 0). JSON-String, per Zod
+  // gelesen (sellerSnapshotSchema/buyerSnapshotSchema). NULL bei Entwuerfen.
+  sellerSnapshotJson    String?
+  buyerSnapshotJson     String?
+  snapshotSource        String?  // FINALIZE | CREATE | MIGRATION
+  snapshotAt            DateTime?
   netTotalCents         Int      @default(0)
   taxTotalCents         Int      @default(0)
   grossTotalCents       Int      @default(0)

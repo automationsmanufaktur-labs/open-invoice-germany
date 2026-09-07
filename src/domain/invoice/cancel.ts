@@ -70,7 +70,12 @@ export async function cancelInvoice(invoiceId: string, opts: CancelOptions = {})
       },
     });
 
-    const finalizedCredit = await finalizeWithinTx(tx, credit.id, { actor, now });
+    const finalizedCredit = await finalizeWithinTx(tx, credit.id, {
+      actor,
+      now,
+      // Storno berichtigt genau das Original: gleicher Empfaenger/Verkaeufer wie dort.
+      inheritSnapshotFrom: { sellerSnapshotJson: original.sellerSnapshotJson, buyerSnapshotJson: original.buyerSnapshotJson },
+    });
 
     await tx.invoice.update({
       where: { id: original.id },
