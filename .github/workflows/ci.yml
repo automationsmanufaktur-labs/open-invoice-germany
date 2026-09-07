@@ -34,9 +34,11 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     env:
-      VALIDATOR_VERSION: "1.5.0"
-      CONFIG_RELEASE: "release-2024-06-20"
-      CONFIG_FILE: "validator-configuration-xrechnung_3.0.2_2024-06-20"
+      # Validator 1.5.x bringt auf Java 17 kein JAXB mit (ClassNotFoundException
+      # javax.xml.bind.*) — 1.6.x ist Java-17-faehig. Konfiguration = XRechnung 3.0.2.
+      VALIDATOR_VERSION: "1.6.3"
+      CONFIG_RELEASE: "v2026-08-31"
+      CONFIG_FILE: "xrechnung-3.0.2-validator-configuration-2026-08-31"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -54,17 +56,42 @@ jobs:
       - name: KoSIT-Validator + XRechnung-Konfiguration laden
         run: |
           mkdir -p kosit/config
-          curl -fsSL -o kosit/validator.zip \
-            "https://github.com/itplr-kosit/validator/releases/download/v${VALIDATOR_VERSION}/validator-${VALIDATOR_VERSION}-distribution.zip"
+          curl -fsSL -o kosit/validator-standalone.jar \
+            "https://github.com/itplr-kosit/validator/releases/download/v${VALIDATOR_VERSION}/validator-${VALIDATOR_VERSION}-standalone.jar"
           curl -fsSL -o kosit/config.zip \
             "https://github.com/itplr-kosit/validator-configuration-xrechnung/releases/download/${CONFIG_RELEASE}/${CONFIG_FILE}.zip"
-          unzip -q kosit/validator.zip -d kosit
           unzip -q kosit/config.zip -d kosit/config
       - name: Validieren
         run: |
-          JAR=$(find kosit -name 'validationtool-*-standalone.jar' | head -1)
+          JAR=kosit/validator-standalone.jar
           SCENARIOS=$(find kosit/config -name 'scenarios.xml' | head -1)
           REPO=$(dirname "$SCENARIOS")
           echo "Validator: $JAR"
           echo "Szenarien: $SCENARIOS"
           java -jar "$JAR" -s "$SCENARIOS" -r "$REPO" tmp/sample-xrechnung.xml
+
+  # Die beiden Schemadateien sind bis auf die Provider-Zeile zeichengleich.
+  # Laufen sie auseinander, entstehen unvollstaendige Postgres-Migrationen —
+  # genau so fehlten RecurringInvoice/RecurringInvoiceLine ueber Monate.
+  schema-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Schemadateien vergleichen
+        run: |
+          diff <(sed 's/provider = "sqlite"/PROVIDER/' prisma/schema.prisma) \
+               <(sed 's/provider = "postgresql"/PROVIDER/' prisma/schema.postgres.prisma) \
+            && echo "Schemadateien sind deckungsgleich."
+
+  postgres-migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: ./scripts/test-postgres-migrations.sh

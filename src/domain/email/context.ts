@@ -1,0 +1,376 @@
+/**
+ * Baut den Platzhalterkontext eines Belegs fuer den Mailversand (Lastenheft 19).
+ * Festgeschriebene Belege liefern die Werte aus dem Snapshot (Phase 0), damit spaetere
+ * Stammdatenaenderungen alte Belege nicht rueckwirkend veraendern.
+ *
+ * internalNotes wird hier NIE gelesen — der Kontext darf interne Notizen nie enthalten
+ * (48).
+ */
+import { dbInternal } from "@/lib/db";
+import { payableBaseCents } from "@/domain/invoice/amounts";
+import { parseSellerSnapshot, parseBuyerSnapshot, parseContactSnapshot, buildSellerSnapshot, buildBuyerSnapshot } from "@/domain/snapshot";
+import { parseCustomerCustomFields } from "@/domain/customer/custom-fields";
+import { formatDateDe, formatMoneyDe } from "@/lib/template/format";
+import type { TemplateContext } from "@/lib/template/render";
+import type { EmailDocType } from "@/schemas/email";
+import type { BuyerSnapshot, SellerSnapshot, ContactSnapshot } from "@/schemas";
+import { DOC_TYPE_LABEL } from "@/lib/email/doc-type-labels";
+
+export { DOC_TYPE_LABEL };
+
+export interface TemplateContextResult {
+  ctx: TemplateContext;
+  customerEmail: string | null;
+  /** Phase 8a (§28): `Customer.invoiceCc` — nur bei INVOICE/CREDIT_NOTE/DUNNING gesetzt
+   *  (Quote/DeliveryNote kennen kein eigenes CC-Kundenfeld). `null` = keine Kundenvorgabe,
+   *  Aufrufer (prefillEmail) faellt dann auf MailSettings.defaultCc zurueck. */
+  customerCc: string | null;
+  docNumber: string;
+}
+
+export class DocumentNotFoundError extends Error {}
+
+/** Vorname/Nachname aus dem Ansprechpartnernamen — am ersten Leerzeichen getrennt, sonst leer. */
+function splitContactName(contactName: string | null | undefined): { firstName: string; lastName: string } {
+  if (!contactName) return { firstName: "", lastName: "" };
+  const idx = contactName.indexOf(" ");
+  if (idx === -1) return { firstName: contactName, lastName: "" };
+  return { firstName: contactName.slice(0, idx), lastName: contactName.slice(idx + 1) };
+}
+
+/**
+ * Kundenkontext aus Snapshot (Name/Ansprechpartner) und Live-Kunde (E-Mail — die
+ * aktuell hinterlegte Adresse, nicht Teil der rechtlich relevanten Snapshot-Betrachtung).
+ * `number` ist ein reservierter, aktuell leerer Pfad (Lastenheft 28, kein Kundennummernfeld
+ * im Schema). `customField` (Lastenheft 31): Werte aus dem Buyer-Snapshot (`customFields`,
+ * Phase 8a), falls vorhanden — sonst live vom Aufrufer nachgeladen (parseCustomerCustomFields).
+ * Fix-Welle B1: dieselben Werte stehen ZUSAETZLICH unter dem Top-Level-Pfad `customField.*`
+ * im Kontext (siehe buildContextObject unten) — die Doku/der Vorlagen-Editor nennen
+ * `{{customField.<key>}}`, nicht `{{customer.customField.<key>}}`.
+ */
+function customerCtx(buyer: BuyerSnapshot, customer: { email: string | null }, customFields: Record<string, unknown> = {}) {
+  const { firstName, lastName } = splitContactName(buyer.contactName);
+  return {
+    name: buyer.name,
+    firstName,
+    lastName,
+    number: "",
+    email: customer.email ?? "",
+    customField: customFields,
+  };
+}
+
+/**
+ * Ansprechpartner-Kontext (Lastenheft §30, Phase 8a): `contact.firstName/lastName/email/
+ * role/phone` aus dem am Beleg gewaehlten Ansprechpartner (Snapshot). Ohne Snapshot
+ * (Legacy-Belege, kein Ansprechpartner gewaehlt) faellt `name` auf `buyer.contactName`
+ * zurueck, die Einzelfelder bleiben leer — es gibt keine strukturierte Legacy-Quelle
+ * fuer Vor-/Nachname/E-Mail/Funktion/Telefon (nur den zusammengesetzten Namen).
+ */
+function contactCtx(contact: ContactSnapshot | null, buyer: BuyerSnapshot) {
+  return {
+    name: contact ? `${contact.firstName} ${contact.lastName}`.trim() : (buyer.contactName ?? ""),
+    firstName: contact?.firstName ?? "",
+    lastName: contact?.lastName ?? "",
+    email: contact?.email ?? "",
+    role: contact?.role ?? "",
+    phone: contact?.phone ?? "",
+  };
+}
+
+/**
+ * Empfaenger-Prioritaet (Lastenheft §28, Phase 8a): Ansprechpartner-E-Mail (Snapshot) >
+ * `invoiceEmail`/`quoteEmail` des Kunden (je nach Belegtyp) > `Customer.email`. Reine
+ * Funktion — der Aufrufer (buildTemplateContext) uebergibt bereits die passende
+ * Kundenvorgabe fuer den jeweiligen Belegtyp.
+ */
+function resolveRecipientEmail(contact: ContactSnapshot | null, docTypeOverride: string | null, customerEmail: string | null): string | null {
+  if (contact?.email) return contact.email;
+  if (docTypeOverride) return docTypeOverride;
+  return customerEmail;
+}
+
+/** Belegkontext. Betraege sind optional (`null` = kein Betrag am Belegtyp, z. B. Lieferschein). */
+function docCtx(
+  type: EmailDocType,
+  number: string | null,
+  date: Date,
+  dueDate: Date | null,
+  grossCents: number | null,
+  netCents: number | null,
+  taxCents: number | null,
+  currency: string,
+) {
+  return {
+    type: DOC_TYPE_LABEL[type],
+    number: number ?? "",
+    date: formatDateDe(date),
+    dueDate: formatDateDe(dueDate),
+    total: grossCents !== null ? formatMoneyDe(grossCents, currency) : "",
+    netTotal: netCents !== null ? formatMoneyDe(netCents, currency) : "",
+    taxTotal: taxCents !== null ? formatMoneyDe(taxCents, currency) : "",
+  };
+}
+
+export interface DocumentTextContextInput {
+  docType: EmailDocType;
+  number: string | null;
+  issueDate: Date;
+  dueDate?: Date | null;
+  validUntil?: Date | null;
+  totals?: { netCents: number; taxCents: number; grossCents: number } | null;
+  currency: string;
+  seller: SellerSnapshot;
+  buyer: BuyerSnapshot;
+  /** Ansprechpartner-Snapshot (Phase 8a, §30) — optional, Aufrufer ohne Kontaktbezug lassen es weg. */
+  contact?: ContactSnapshot | null;
+}
+
+/**
+ * DB-freier Platzhalterkontext fuer Kopf-/Fusstexte in PDFs (Rechnung, Dokument,
+ * Lieferschein). Nutzt dieselben Zweige (customerCtx/docCtx) wie buildTemplateContext,
+ * laedt aber nichts selbst — Seller/Buyer kommen bereits aufgeloest (Snapshot-mit-
+ * Fallback) vom Aufrufer (mapper.ts/pdf-data.ts/delivery-note-data.ts).
+ * internalNotes ist hier strukturell nicht erreichbar (48).
+ */
+export function buildDocumentTextContext(input: DocumentTextContextInput): TemplateContext {
+  const company = {
+    name: input.seller.legalName,
+    email: input.seller.email ?? "",
+    phone: input.seller.phone ?? "",
+    iban: input.seller.iban ?? "",
+    bic: input.seller.bic ?? "",
+  };
+  const payment = { iban: input.seller.iban ?? "", bic: input.seller.bic ?? "" };
+  const dueOrValid = input.dueDate ?? input.validUntil ?? null;
+
+  return {
+    customer: customerCtx(input.buyer, { email: input.buyer.email }, input.buyer.customFields),
+    customField: input.buyer.customFields ?? {},
+    company,
+    payment,
+    document: docCtx(
+      input.docType,
+      input.number,
+      input.issueDate,
+      dueOrValid,
+      input.totals?.grossCents ?? null,
+      input.totals?.netCents ?? null,
+      input.totals?.taxCents ?? null,
+      input.currency,
+    ),
+    contact: contactCtx(input.contact ?? null, input.buyer),
+  };
+}
+
+export interface BuildTemplateContextOptions {
+  /**
+   * Fertige URL des aktiven Angebotslinks fuer `{{offer.link}}` (nur docType ANGEBOT).
+   * Wird vom Aufrufer (compose.ts, `prefillEmail`) ermittelt/erzeugt — `buildTemplateContext`
+   * selbst legt nie einen Link an (bleibt lesend, ohne Seitenwirkung, damit Preview/Send
+   * gefahrlos wiederholt aufgerufen werden koennen). Ohne Wert bleibt `offer.link` "".
+   */
+  offerLink?: string;
+}
+
+/** Baut den Platzhalterkontext eines Belegs. Festgeschriebene Belege: Werte aus dem Snapshot. */
+export async function buildTemplateContext(
+  orgId: string,
+  docType: EmailDocType,
+  docId: string,
+  opts: BuildTemplateContextOptions = {},
+): Promise<TemplateContextResult> {
+  const org = await dbInternal.organization.findUniqueOrThrow({ where: { id: orgId } });
+  const company = { name: org.legalName, email: org.email ?? "", phone: org.phone ?? "", iban: org.iban ?? "", bic: org.bic ?? "" };
+  const payment = { iban: org.iban ?? "", bic: org.bic ?? "" };
+
+  if (docType === "INVOICE" || docType === "CREDIT_NOTE") {
+    // Invoice.type kennt INVOICE, CREDIT_NOTE, CORRECTION und (Phase 5) PARTIAL/
+    // DOWNPAYMENT/FINAL. Fuer den E-Mail-Dokumenttyp INVOICE zaehlen alle vier
+    // Nicht-Gutschrift-Typen (B2, Fix-Welle) — sonst waere ausgerechnet die
+    // Schlussrechnung, die § 14 Abs. 5 UStG zwingend an den Kunden gehen muss, per Mail
+    // unversendbar ("Rechnung nicht gefunden").
+    const okTypes = docType === "CREDIT_NOTE" ? ["CREDIT_NOTE"] : ["INVOICE", "CORRECTION", "PARTIAL", "DOWNPAYMENT", "FINAL"];
+    const inv = await dbInternal.invoice.findFirst({ where: { id: docId, orgId, type: { in: okTypes } }, include: { customer: true } });
+    if (!inv) throw new DocumentNotFoundError("Rechnung nicht gefunden");
+    const snapshotCtx = `email:${docType}:${docId}`;
+    const buyer = parseBuyerSnapshot(inv.buyerSnapshotJson, buildBuyerSnapshot(inv.customer), snapshotCtx);
+    const seller = parseSellerSnapshot(inv.sellerSnapshotJson, buildSellerSnapshot(org), snapshotCtx);
+    // B2 (Fix-Welle): payableBaseCents statt grossTotalCents — sonst zeigt
+    // {{invoice.openAmount}} bei einer Schlussrechnung den vollen Rechnungsbetrag statt
+    // des Rests nach Abzug der Abschlaege (der Kunde wuerde zur erneuten Zahlung der
+    // bereits geleisteten Abschlaege aufgefordert).
+    const open = payableBaseCents(inv) - inv.paidAmountCents;
+    const contact = parseContactSnapshot(inv.contactSnapshotJson, null, snapshotCtx);
+    const customFields = buyer.customFields ?? (await parseCustomerCustomFields(orgId, inv.customer.customFieldsJson));
+    return {
+      ctx: {
+        customer: customerCtx(buyer, inv.customer, customFields),
+        customField: customFields,
+        company: { ...company, name: seller.legalName },
+        payment,
+        document: docCtx(docType, inv.number, inv.issueDate, inv.dueDate, inv.grossTotalCents, inv.netTotalCents, inv.taxTotalCents, inv.currency),
+        invoice: {
+          number: inv.number ?? "",
+          date: formatDateDe(inv.issueDate),
+          total: formatMoneyDe(inv.grossTotalCents, inv.currency),
+          dueDate: formatDateDe(inv.dueDate),
+          openAmount: formatMoneyDe(open, inv.currency),
+        },
+        contact: contactCtx(contact, buyer),
+      },
+      // Empfaenger-Prioritaet (§28): Ansprechpartner-E-Mail > Customer.invoiceEmail > Customer.email.
+      customerEmail: resolveRecipientEmail(contact, inv.customer.invoiceEmail, inv.customer.email),
+      customerCc: inv.customer.invoiceCc,
+      docNumber: inv.number ?? "ENTWURF",
+    };
+  }
+
+  if (docType === "DUNNING") {
+    const d = await dbInternal.dunning.findFirst({
+      where: { id: docId, invoice: { orgId } },
+      include: { invoice: { include: { customer: true } }, stage: true },
+    });
+    if (!d) throw new DocumentNotFoundError("Mahnung nicht gefunden");
+    const inv = d.invoice;
+    const snapshotCtx = `email:DUNNING:${docId}`;
+    const buyer = parseBuyerSnapshot(inv.buyerSnapshotJson, buildBuyerSnapshot(inv.customer), snapshotCtx);
+    const seller = parseSellerSnapshot(inv.sellerSnapshotJson, buildSellerSnapshot(org), snapshotCtx);
+    // Phase 6: {{invoice.openAmount}} zeigt die Forderungsbasis ZUM ERSTELLUNGSZEITPUNKT
+    // dieser Mahnung (`claimBaseCents`, Snapshot), nicht den heutigen Live-Stand — sonst
+    // wuerde eine E-Mail zu einer bereits verschickten Mahnung nachtraeglich einen anderen
+    // Betrag zeigen, wenn zwischenzeitlich eine Teilzahlung eingegangen ist. Altmahnungen
+    // ohne echten Betrags-Snapshot (`claimBaseCents` 0) fallen auf den Live-Stand zurueck.
+    // S2 (Fix-Welle): NUR "CREATE" traegt einen Betrags-Snapshot — "MIGRATION"
+    // (ensureDunningSnapshots) traegt nur Kaeufer-/Verkaeuferdaten nach, claimBaseCents
+    // bleibt dort 0 (nicht rekonstruierbar); `!= null` haette MIGRATION-Zeilen faelschlich
+    // 0,00 € als offenen Betrag in der Mail zeigen lassen statt live zu berechnen.
+    const open = d.snapshotSource === "CREATE" ? d.claimBaseCents : inv.grossTotalCents - inv.paidAmountCents;
+    const fees = d.lateFeeCents + d.flatFee40Cents + d.feeCents;
+    const total = open + d.interestAmountCents + fees;
+    const contact = parseContactSnapshot(inv.contactSnapshotJson, null, snapshotCtx);
+    const customFields = buyer.customFields ?? (await parseCustomerCustomFields(orgId, inv.customer.customFieldsJson));
+    return {
+      ctx: {
+        customer: customerCtx(buyer, inv.customer, customFields),
+        customField: customFields,
+        company: { ...company, name: seller.legalName },
+        payment,
+        document: docCtx("DUNNING", d.number, d.sentAt, d.dueDate, total, null, null, inv.currency),
+        invoice: {
+          number: inv.number ?? "",
+          date: formatDateDe(inv.issueDate),
+          total: formatMoneyDe(inv.grossTotalCents, inv.currency),
+          dueDate: formatDateDe(inv.dueDate),
+          openAmount: formatMoneyDe(open, inv.currency),
+        },
+        dunning: {
+          level: d.level,
+          stageName: d.stage?.name ?? "",
+          number: d.number ?? "",
+          newDueDate: formatDateDe(d.dueDate),
+          fee: formatMoneyDe(fees, inv.currency),
+          interest: formatMoneyDe(d.interestAmountCents, inv.currency),
+          total: formatMoneyDe(total, inv.currency),
+        },
+        contact: contactCtx(contact, buyer),
+      },
+      customerEmail: resolveRecipientEmail(contact, inv.customer.invoiceEmail, inv.customer.email),
+      customerCc: inv.customer.invoiceCc,
+      docNumber: d.number ?? "ENTWURF",
+    };
+  }
+
+  if (docType === "DELIVERY_NOTE") {
+    const dn = await dbInternal.deliveryNote.findFirst({ where: { id: docId, orgId }, include: { customer: true } });
+    if (!dn) throw new DocumentNotFoundError("Lieferschein nicht gefunden");
+    const snapshotCtx = `email:DELIVERY_NOTE:${docId}`;
+    const buyer = parseBuyerSnapshot(dn.buyerSnapshotJson, buildBuyerSnapshot(dn.customer), snapshotCtx);
+    const seller = parseSellerSnapshot(dn.sellerSnapshotJson, buildSellerSnapshot(org), snapshotCtx);
+    const contact = parseContactSnapshot(dn.contactSnapshotJson, null, snapshotCtx);
+    const customFields = buyer.customFields ?? (await parseCustomerCustomFields(orgId, dn.customer.customFieldsJson));
+    return {
+      ctx: {
+        customer: customerCtx(buyer, dn.customer, customFields),
+        customField: customFields,
+        company: { ...company, name: seller.legalName },
+        payment,
+        document: docCtx("DELIVERY_NOTE", dn.number, dn.issueDate, dn.deliveryDate, null, null, null, "EUR"),
+        contact: contactCtx(contact, buyer),
+      },
+      // Lieferschein kennt keine eigene invoiceEmail/quoteEmail-Kundenvorgabe.
+      customerEmail: resolveRecipientEmail(contact, null, dn.customer.email),
+      customerCc: null,
+      docNumber: dn.number ?? "ENTWURF",
+    };
+  }
+
+  // ANGEBOT / AUFTRAGSBESTAETIGUNG / PROFORMA
+  const q = await dbInternal.quote.findFirst({ where: { id: docId, orgId, kind: docType }, include: { customer: true } });
+  if (!q) throw new DocumentNotFoundError("Dokument nicht gefunden");
+  const snapshotCtx = `email:${docType}:${docId}`;
+  const buyer = parseBuyerSnapshot(q.buyerSnapshotJson, buildBuyerSnapshot(q.customer), snapshotCtx);
+  const seller = parseSellerSnapshot(q.sellerSnapshotJson, buildSellerSnapshot(org), snapshotCtx);
+  const contact = parseContactSnapshot(q.contactSnapshotJson, null, snapshotCtx);
+  const customFields = buyer.customFields ?? (await parseCustomerCustomFields(orgId, q.customer.customFieldsJson));
+  return {
+    ctx: {
+      customer: customerCtx(buyer, q.customer, customFields),
+      customField: customFields,
+      company: { ...company, name: seller.legalName },
+      payment,
+      document: docCtx(docType, q.number, q.issueDate, q.validUntil, q.grossTotalCents, q.netTotalCents, q.taxTotalCents, q.currency),
+      offer: { number: q.number ?? "", validUntil: formatDateDe(q.validUntil), link: docType === "ANGEBOT" ? (opts.offerLink ?? "") : "" },
+      contact: contactCtx(contact, buyer),
+    },
+    // Empfaenger-Prioritaet (§28): Ansprechpartner-E-Mail > Customer.quoteEmail > Customer.email.
+    customerEmail: resolveRecipientEmail(contact, q.customer.quoteEmail, q.customer.email),
+    customerCc: null,
+    docNumber: q.number ?? "ENTWURF",
+  };
+}
+
+/**
+ * Fester Beispielkontext fuer die Vorlagen-Vorschau im Editor (Lastenheft 19, Abschnitt 5).
+ * Kein Datenbankzugriff — dient ausschliesslich der Anzeige im Vorlagen-Editor, bevor ein
+ * echter Beleg gewaehlt wurde.
+ */
+export function sampleTemplateContext(docType: EmailDocType): TemplateContext {
+  const today = new Date();
+  const dueDate = new Date(today);
+  dueDate.setDate(dueDate.getDate() + 14);
+
+  const company = { name: "Muster GmbH", email: "kontakt@muster-gmbh.de", phone: "+49 30 1234567", iban: "DE12 3456 7890 1234 5678 90", bic: "MUSTDE00XXX" };
+  const payment = { iban: company.iban, bic: company.bic };
+  const customer = { name: "Beispiel AG", firstName: "Max", lastName: "Mustermann", number: "", email: "buchhaltung@beispiel-ag.de", customField: {} };
+
+  const documentByType: Record<EmailDocType, ReturnType<typeof docCtx>> = {
+    ANGEBOT: docCtx("ANGEBOT", "AN-2026-0042", today, dueDate, 119000, 100000, 19000, "EUR"),
+    AUFTRAGSBESTAETIGUNG: docCtx("AUFTRAGSBESTAETIGUNG", "AB-2026-0042", today, dueDate, 119000, 100000, 19000, "EUR"),
+    PROFORMA: docCtx("PROFORMA", "PF-2026-0042", today, dueDate, 119000, 100000, 19000, "EUR"),
+    INVOICE: docCtx("INVOICE", "RE-2026-0042", today, dueDate, 119000, 100000, 19000, "EUR"),
+    CREDIT_NOTE: docCtx("CREDIT_NOTE", "GS-2026-0042", today, dueDate, 119000, 100000, 19000, "EUR"),
+    DUNNING: docCtx("DUNNING", "MA-2026-0042", today, dueDate, 119000, null, null, "EUR"),
+    DELIVERY_NOTE: docCtx("DELIVERY_NOTE", "LS-2026-0042", today, dueDate, null, null, null, "EUR"),
+  };
+
+  return {
+    customer,
+    customField: {},
+    company,
+    payment,
+    document: documentByType[docType],
+    invoice: { number: "RE-2026-0042", date: formatDateDe(today), total: formatMoneyDe(119000, "EUR"), dueDate: formatDateDe(dueDate), openAmount: formatMoneyDe(119000, "EUR") },
+    offer: { number: "AN-2026-0042", validUntil: formatDateDe(dueDate), link: "https://beispiel.invalid/angebot/beispiel-token" },
+    dunning: {
+      level: 1,
+      stageName: "1. Mahnung",
+      number: "MA-2026-0042",
+      newDueDate: formatDateDe(dueDate),
+      fee: formatMoneyDe(500, "EUR"),
+      interest: formatMoneyDe(1200, "EUR"),
+      total: formatMoneyDe(120700, "EUR"),
+    },
+    contact: { name: "Max Mustermann", firstName: "Max", lastName: "Mustermann", email: "max.mustermann@beispiel-ag.de", role: "Einkauf", phone: "+49 30 7654321" },
+  };
+}

@@ -8,9 +8,11 @@
  * Belegnummern-Logik (src/domain/numbering.ts).
  */
 
-export type RecurInterval = "WEEKLY" | "MONTHLY" | "QUARTERLY" | "YEARLY";
+// Phase 8b (§43): DAY ergaenzt WEEKLY/MONTHLY/QUARTERLY/YEARLY um "+intervalCount Tage".
+export type RecurInterval = "DAY" | "WEEKLY" | "MONTHLY" | "QUARTERLY" | "YEARLY";
 
 const MONTHS_PER: Record<RecurInterval, number> = {
+  DAY: 0,
   WEEKLY: 0,
   MONTHLY: 1,
   QUARTERLY: 3,
@@ -18,6 +20,7 @@ const MONTHS_PER: Record<RecurInterval, number> = {
 };
 
 export const INTERVAL_LABEL: Record<RecurInterval, string> = {
+  DAY: "täglich",
   WEEKLY: "wöchentlich",
   MONTHLY: "monatlich",
   QUARTERLY: "vierteljährlich",
@@ -28,6 +31,7 @@ export function intervalLabel(interval: string, count = 1): string {
   const base = INTERVAL_LABEL[interval as RecurInterval] ?? interval;
   if (count <= 1) return base;
   const unit: Record<RecurInterval, string> = {
+    DAY: "Tage",
     WEEKLY: "Wochen",
     MONTHLY: "Monate",
     QUARTERLY: "Quartale",
@@ -47,6 +51,9 @@ export function normalizeToNoon(d: Date): Date {
 }
 
 export function advanceDate(from: Date, interval: RecurInterval, count = 1, anchorDay?: number | null): Date {
+  if (interval === "DAY") {
+    return new Date(from.getFullYear(), from.getMonth(), from.getDate() + count, 12, 0, 0, 0);
+  }
   if (interval === "WEEKLY") {
     return new Date(from.getFullYear(), from.getMonth(), from.getDate() + 7 * count, 12, 0, 0, 0);
   }

@@ -50,7 +50,12 @@ export function validateXRechnung(data: EInvoiceData, xml: string): ValidationRe
   if (!data.buyer.name) errors.push("BR-07: Name des Käufers fehlt.");
   if (!data.buyer.addressLine1 || !data.buyer.city || !data.buyer.postalCode || !data.buyer.countryCode)
     errors.push("BR-10: Postanschrift des Käufers unvollständig.");
-  if (data.lines.length === 0) errors.push("BR-16: Mindestens eine Rechnungsposition erforderlich.");
+  // Phase-4b-Review (Commit 0): data.lines enthaelt auch HEADING/TEXT/SUBTOTAL-Zeilen
+  // (§8, reine Gliederungszeilen ohne Betrag) — BR-16 verlangt mindestens eine echte
+  // Rechnungsposition (ITEM), nicht irgendeine Zeile. Fehlt lineType (Alt-Fixtures vor
+  // Phase 4b), gilt die Zeile als ITEM (siehe xrechnung.ts/cii.ts isItemLine).
+  const itemLineCount = data.lines.filter((l) => (l.lineType ?? "ITEM") === "ITEM").length;
+  if (itemLineCount === 0) errors.push("BR-16: Mindestens eine Rechnungsposition erforderlich.");
   if (data.taxSubtotals.length === 0) errors.push("BR-CO-18: Mindestens eine USt-Aufschlüsselungsgruppe erforderlich.");
 
   data.lines.forEach((line, i) => {
@@ -59,14 +64,33 @@ export function validateXRechnung(data: EInvoiceData, xml: string): ValidationRe
   });
 
   // Rechenregeln
+  // BR-CO-10: Σ Positionsnetto (BT-131, nach Zeilenrabatt) = Summe Positionsbeträge (BT-106).
+  // Ohne Beleganpassung ist lineTotalCents === netTotalCents (Alt-Verhalten unveraendert).
   const lineSum = data.lines.reduce((s, l) => s + l.lineNetCents, 0);
-  if (lineSum !== data.netTotalCents)
-    errors.push(`BR-CO-10: Σ Positionsnetto (${lineSum}) ≠ Summe Positionsbeträge (${data.netTotalCents}).`);
+  const expectedLineTotal = data.lineTotalCents ?? data.netTotalCents;
+  if (lineSum !== expectedLineTotal)
+    errors.push(`BR-CO-10: Σ Positionsnetto (${lineSum}) ≠ Summe Positionsbeträge (${expectedLineTotal}).`);
 
+  // BR-CO-11/12: Σ Beleg-Allowance/Charge je Gruppe = AllowanceTotalAmount/ChargeTotalAmount.
+  const allowanceSum = data.taxSubtotals.reduce((s, t) => s + (t.allowanceCents ?? 0), 0);
+  const chargeSum = data.taxSubtotals.reduce((s, t) => s + (t.chargeCents ?? 0), 0);
+  const expectedAllowanceTotal = data.allowanceTotalCents ?? 0;
+  const expectedChargeTotal = data.chargeTotalCents ?? 0;
+  if (allowanceSum !== expectedAllowanceTotal)
+    errors.push(`BR-CO-11: Σ Belegrabatt (${allowanceSum}) ≠ AllowanceTotalAmount (${expectedAllowanceTotal}).`);
+  if (chargeSum !== expectedChargeTotal)
+    errors.push(`BR-CO-12: Σ Belegaufschlag (${chargeSum}) ≠ ChargeTotalAmount (${expectedChargeTotal}).`);
+
+  // BR-CO-13: TaxExclusiveAmount = Σ LineExtension − AllowanceTotal + ChargeTotal.
   const subNet = data.taxSubtotals.reduce((s, t) => s + t.netCents, 0);
   const subTax = data.taxSubtotals.reduce((s, t) => s + t.taxCents, 0);
+  const expectedTaxExclusive = expectedLineTotal - expectedAllowanceTotal + expectedChargeTotal;
   if (subNet !== data.netTotalCents)
     errors.push(`BR-CO-13: Σ steuerbare Beträge (${subNet}) ≠ Nettogesamtbetrag (${data.netTotalCents}).`);
+  if (expectedTaxExclusive !== data.netTotalCents)
+    errors.push(
+      `BR-CO-13: Positionssumme − Rabatt + Aufschlag (${expectedTaxExclusive}) ≠ Nettogesamtbetrag (${data.netTotalCents}).`,
+    );
   if (subTax !== data.taxTotalCents)
     errors.push(`BR-CO-14: Σ Steuerbeträge (${subTax}) ≠ Gesamtsteuerbetrag (${data.taxTotalCents}).`);
 
