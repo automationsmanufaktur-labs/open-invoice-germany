@@ -14,6 +14,7 @@ export interface NumberPatternContext {
   padding: number;
   year: number;
   month: number;
+  day: number;
 }
 
 const DOC_TYPE_DEFAULT_PREFIX: Record<string, string> = {
@@ -24,15 +25,47 @@ const DOC_TYPE_DEFAULT_PREFIX: Record<string, string> = {
   AUFTRAGSBESTAETIGUNG: "AB-",
   PROFORMA: "PF-",
   DUNNING: "MA-",
+  DELIVERY_NOTE: "LS-",
+  CUSTOMER: "K-",
+  PRODUCT: "P-",
 };
 
 export function defaultPrefix(docType: string): string {
   return DOC_TYPE_DEFAULT_PREFIX[docType] ?? "";
 }
 
+/** Default-Vorbelegung eines neuen Nummernkreises (Phase 7, Task 1, §34). */
+export interface DefaultNumberPattern {
+  prefix: string;
+  pattern: string;
+  seqPadding: number;
+  /** true = Nummernkreis ist jahresgebunden (NumberRange.year = aktuelles Jahr), false = jahresunabhaengig (year 0). */
+  yearlyReset: boolean;
+}
+
+// Kunden-/Artikelnummern sind KEIN GoBD-Beleg (§14 gilt nicht) und daher standardmaessig
+// jahresunabhaengig (Ruling Task-1-Facts) — abweichend von den Belegnummernkreisen, die
+// per Default jahresgebunden bleiben (bestehendes Verhalten in finalize.ts/status.ts).
+const NUMBER_RANGE_OVERRIDES: Record<string, DefaultNumberPattern> = {
+  CUSTOMER: { prefix: "KD-", pattern: "{PREFIX}{SEQ:5}", seqPadding: 5, yearlyReset: false },
+  PRODUCT: { prefix: "ART-", pattern: "{PREFIX}{SEQ:5}", seqPadding: 5, yearlyReset: false },
+};
+
+/** Default-Muster + Vorbelegung fuer einen Nummernkreis-Typ (src/domain/numbering/ranges.ts). */
+export function defaultPattern(docType: string): DefaultNumberPattern {
+  return (
+    NUMBER_RANGE_OVERRIDES[docType] ?? {
+      prefix: defaultPrefix(docType),
+      pattern: "{PREFIX}{YYYY}-{SEQ}",
+      seqPadding: 4,
+      yearlyReset: true,
+    }
+  );
+}
+
 /**
  * Setzt ein Nummern-Pattern auf. Platzhalter:
- *   {PREFIX} {YYYY} {YY} {MM} {SEQ}
+ *   {PREFIX} {YYYY} {YY} {MM} {DD} {SEQ} {SEQ:n}
  */
 export function formatDocumentNumber(pattern: string, ctx: NumberPatternContext): string {
   return pattern
@@ -40,5 +73,8 @@ export function formatDocumentNumber(pattern: string, ctx: NumberPatternContext)
     .replace(/\{YYYY\}/g, String(ctx.year).padStart(4, "0"))
     .replace(/\{YY\}/g, String(ctx.year % 100).padStart(2, "0"))
     .replace(/\{MM\}/g, String(ctx.month).padStart(2, "0"))
+    .replace(/\{DD\}/g, String(ctx.day).padStart(2, "0"))
+    // {SEQ:n} — explizite Stellenzahl hat Vorrang vor padding
+    .replace(/\{SEQ:(\d+)\}/g, (_m, n: string) => String(ctx.seq).padStart(Number(n), "0"))
     .replace(/\{SEQ\}/g, String(ctx.seq).padStart(ctx.padding, "0"));
 }

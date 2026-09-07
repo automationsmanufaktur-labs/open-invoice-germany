@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { dbInternal } from "@/lib/db";
 import { getActiveOrg } from "@/lib/org";
+import { loadDocumentSettings } from "@/domain/document/settings";
 import { NewRecurringForm } from "@/components/NewRecurringForm";
 import { NeedOrgNotice } from "@/components/NeedOrgNotice";
 
@@ -14,13 +15,17 @@ export default async function NeuesAboPage() {
     return <NeedOrgNotice />;
   }
 
-  const [customers, products] = await Promise.all([
+  const docSettings = await loadDocumentSettings(orgId);
+
+  const [customers, products, emailTemplates] = await Promise.all([
     dbInternal.customer.findMany({ where: { orgId, isArchived: false }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
     dbInternal.product.findMany({
       where: { orgId, isArchived: false },
       select: { id: true, name: true, unit: true, netPriceCents: true, taxRate: true },
       orderBy: { name: "asc" },
     }),
+    // Phase 8b (§43): INVOICE-Vorlagen fuer emailTemplateId (nur relevant bei autoSend).
+    dbInternal.emailTemplate.findMany({ where: { orgId, docType: "INVOICE" }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
   ]);
 
   if (customers.length === 0) {
@@ -43,7 +48,15 @@ export default async function NeuesAboPage() {
         </Link>
         <h1 className="text-2xl font-bold tracking-tight">Neues Abo</h1>
       </div>
-      <NewRecurringForm customers={customers} products={products} />
+      <NewRecurringForm
+        customers={customers}
+        products={products}
+        emailTemplates={emailTemplates}
+        defaultAutoFinalize={docSettings.recurringAutoFinalizeDefault}
+        defaultAutoSend={docSettings.recurringAutoSendDefault}
+        defaultCurrency={docSettings.defaultCurrency}
+        defaultShowPeriodText={docSettings.recurringInsertPeriodText}
+      />
     </div>
   );
 }

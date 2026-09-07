@@ -28,6 +28,10 @@ export interface MandatoryLine {
   quantityMilli: number;
   taxRate: number;
   taxCategory: string;
+  // Phase 4b (§8) — Fix-Welle K1: HEADING/TEXT/SUBTOTAL sind reine Gliederungszeilen ohne
+  // Betrag/Menge und duerfen die Pflichtangaben-Pruefung nicht mit einem
+  // "Menge fehlt/0"-Befund blockieren. Fehlt lineType (Alt-Aufrufer), wird ITEM angenommen.
+  lineType?: string;
 }
 
 export interface MandatoryInvoice {
@@ -87,9 +91,12 @@ export function validateMandatoryFields(inv: MandatoryInvoice): string[] {
   // § 14 Abs. 4 Nr. 3 — Ausstellungsdatum
   if (!inv.issueDate) problems.push("Ausstellungsdatum fehlt (§ 14 Abs. 4 Nr. 3).");
 
-  // § 14 Abs. 4 Nr. 5 — Menge/Art der Leistung
-  if (inv.lines.length === 0) problems.push("Mindestens eine Position erforderlich (§ 14 Abs. 4 Nr. 5).");
-  inv.lines.forEach((line, idx) => {
+  // § 14 Abs. 4 Nr. 5 — Menge/Art der Leistung. Nur ITEM-Zeilen zaehlen als Positionen im
+  // Sinne dieser Vorschrift — HEADING/TEXT/SUBTOTAL sind reine Gliederungszeilen ohne
+  // Betrag/Menge (§8, kein Menge-0-Workaround) und werden hier uebersprungen.
+  const itemLines = inv.lines.filter((l) => (l.lineType ?? "ITEM") === "ITEM");
+  if (itemLines.length === 0) problems.push("Mindestens eine Position erforderlich (§ 14 Abs. 4 Nr. 5).");
+  itemLines.forEach((line, idx) => {
     if (!line.description?.trim())
       problems.push(`Position ${idx + 1}: Leistungsbeschreibung fehlt (§ 14 Abs. 4 Nr. 5).`);
     if (!Number.isFinite(line.quantityMilli) || line.quantityMilli === 0)

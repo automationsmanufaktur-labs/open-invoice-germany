@@ -52,3 +52,7 @@ next-env.d.ts
 
 # heruntergeladenes EN-16931-XSLT + SVRL-Reports (Validierung)
 /validation/.cache
+
+# Beleganhaenge (Phase 4b, ATTACHMENTS_DIR-Default) — ausserhalb des Web-Roots, aber
+# lokal unter data/ abgelegt; nie ins Repo, kein Compose-Volume beim lokalen Dev.
+/data

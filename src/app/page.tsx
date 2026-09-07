@@ -1,4 +1,10 @@
 import Link from "next/link";
+import { getCurrentUserId } from "@/lib/auth/server";
+import { getActiveOrg } from "@/lib/org";
+import { dashboardSummary } from "@/domain/dashboard/summary";
+import { DashboardWidgets } from "@/components/dashboard/DashboardWidgets";
+
+export const dynamic = "force-dynamic";
 
 const FEATURES = [
   {
@@ -19,7 +25,7 @@ const FEATURES = [
   },
 ];
 
-export default function Home() {
+function MarketingPage() {
   return (
     <div className="space-y-16">
       <section className="space-y-6">
@@ -37,10 +43,10 @@ export default function Home() {
         </p>
         <div className="flex flex-wrap gap-3">
           <Link
-            href="/rechnungen"
+            href="/login"
             className="rounded-md bg-indigo-600 px-5 py-2.5 font-medium text-white hover:bg-indigo-700"
           >
-            Zu den Rechnungen
+            Anmelden
           </Link>
           <a
             href="https://github.com/automationsmanufaktur-labs/open-invoice-germany"
@@ -65,6 +71,30 @@ export default function Home() {
         zusätzlich eine Verfahrensdokumentation des Anwenders. Alle rechtlichen Grundlagen mit Quellen findest du in
         der Datei <code className="font-mono">COMPLIANCE.md</code>.
       </section>
+    </div>
+  );
+}
+
+/**
+ * Task 4 (Facts): angemeldet -> Dashboard, sonst die bestehende Login-/Marketingseite —
+ * ueber den bestehenden Auth-Helfer (src/lib/auth/server), kein Route-Group-Umbau.
+ */
+export default async function Home() {
+  const userId = await getCurrentUserId();
+  if (!userId) return <MarketingPage />;
+
+  const org = await getActiveOrg();
+  const summary = await dashboardSummary(org.id);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
+        <Link href="/rechnungen/neu" className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700">
+          Neue Rechnung
+        </Link>
+      </div>
+      <DashboardWidgets summary={summary} />
     </div>
   );
 }
