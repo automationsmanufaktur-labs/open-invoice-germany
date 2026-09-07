@@ -212,6 +212,11 @@ Für EU-weite Inanspruchnahme der Befreiung in anderen Mitgliedstaaten (besonder
 | BG-23 / BT-118, BT-119 | VAT category code + rate | § 14 Abs. 4 Nr. 8 |
 | BT-121 | VAT category code (z.B. „AE" Reverse charge, „E" steuerbefreit) | § 14a |
 | BG-25 / BT-129, BT-153 | Menge / Art der Leistung | § 14 Abs. 4 Nr. 5 |
+| BG-27 / BT-136, BT-140 | Rabatt auf Zeilenebene (`AllowanceCharge`, Positionsrabatt) | § 14 Abs. 4 Nr. 7 (Entgeltminderung) |
+| BG-28 / BT-141, BT-145 | Aufschlag auf Zeilenebene (`AllowanceCharge`) | § 14 Abs. 4 Nr. 7 |
+| BG-20 / BT-92, BT-93, BT-96 | Rabatt auf Dokumentebene (`AllowanceCharge`, Belegrabatt) | § 14 Abs. 4 Nr. 7 |
+| BG-21 / BT-99, BT-100, BT-103 | Aufschlag auf Dokumentebene (`AllowanceCharge`, Belegaufschlag) | § 14 Abs. 4 Nr. 7 |
+| BT-107, BT-108 | Summe Zeilenrabatte / Summe Zeilenaufschläge (Netto-Summenfelder) | Rechenprobe EN 16931 |
 
 > **[ungesichert]** Das konkrete Mapping der Reverse-Charge-/§-25a-/Steuerbefreiungs-Hinweise auf EN-16931-VAT-Category-Codes und Begründungstexte (BT-120/BT-121) ist gegen die aktuelle KoSIT/XRechnung-Spezifikation zu prüfen — nicht primärquellen-verifiziert.
 
@@ -548,6 +553,7 @@ Bei OSS-Teilnahme **entfällt** die Rechnungsausstellungspflicht für die betrof
 - § 14 Abs. 4 S. 1 Nr. 7 verlangt **jede im Voraus vereinbarte Entgeltminderung**. Bei Skonto genügt eine **Freitext-Angabe** wie „2 % Skonto bei Zahlung bis …". Das Skonto muss **NICHT betragsmäßig** ausgewiesen werden (BMF 15.10.2025, Abschn. 14.5 Abs. 19 S. 11–12).
 - **Spätere Zahlung unter Skontoausnutzung** = Änderung der Bemessungsgrundlage nach § 17 UStG → **keine** Rechnungsberichtigung (§ 31 Abs. 5) nötig; Belegaustausch nur in § 17 Abs. 4-Fällen, Beleg muss keine USt-Rechnung sein.
 - EN 16931: Skonto/Zahlungsbedingungen im Freitextfeld **BT-20**. **[ungesichert]** Eine strukturierte KoSIT-Konvention (`SKONTO TAGE=n PROZENT=n`) ist eine **technische Empfehlung zur Auswertbarkeit, KEINE umsatzsteuerliche Pflicht** — vor Produktiveinsatz gegen aktuelle KoSIT/XRechnung-Spezifikation testen.
+- **Umsetzung dieser Software** (`src/lib/pricing/skonto.ts`, `src/lib/einvoice/mapper.ts`): Für bis zu zwei Skontoziele wird je Ziel eine Zeile `#SKONTO#TAGE=n#PROZENT=x.xx#` vor dem menschenlesbaren Zahlungsbedingungstext in BT-20 eingefügt (UBL **und** CII, `PaymentTerms`/`SpecifiedTradePaymentTerms`); der Betrag selbst wird **nicht** ausgewiesen, nur Frist und Prozentsatz — genügt der o.g. Freitext-Anforderung. Quelle für die Tag-Syntax: **XRechnung-Spezifikation 3.0.2 (KoSIT)**, Abschnitt „Zahlungsbedingungen"/BT-20 (`validator-configuration-xrechnung_3.0.2_2024-06-20`, s. `scripts/validate-erechnung.ts`); die Syntax ist — wie oben vermerkt — eine Auswertungs-Konvention, keine Schematron-Pflichtregel, und wird daher parallel zur Kernvalidierung (`npm run validate:erechnung`) gegen die offiziellen EN-16931-/XRechnung-CIUS-Schematron-Regeln getestet (13 Fixtures, u. a. `skonto-two-terms`). Fremdwährungs-Skonto (BT-20 nur in Rechnungswährung) ist **nicht** abgebildet.
 
 ### § 17-Fälle ohne Berichtigungspflicht (BMF Rn. 51a)
 
@@ -656,7 +662,8 @@ Skonti · Nachlässe wegen Mängelrügen **ohne** Auswirkung auf die abgerechnet
 | E-Rechnung empfangen | Empfangskanal (E-Mail-Postfach + XML-Parser); Pflicht seit 1.1.2025 | **MVP** |
 | Hybrid-E-Rechnung | strukturierter XML-Teil **führend**; bei Abweichung XML maßgebend; Bildteil nur bei steuerlich relevanter Abweichung archivieren | **Später** |
 | Leitweg-ID (B2G) | BT-10-Feld; **Mod-97-10-Prüfziffer-Validierung**; vom Auftraggeber übernommen (nicht generiert); im B2B leer | **Später** (nur bei B2G) |
-| Skonto in E-Rechnung | Freitext BT-20 „X % Skonto bei Zahlung bis …"; **kein** betragsmäßiger Ausweis nötig; spätere Skonto-Zahlung = § 17, **keine** Korrekturrechnung | **MVP** |
+| Skonto in E-Rechnung | Freitext BT-20 „X % Skonto bei Zahlung bis …" + strukturierte `#SKONTO#TAGE=n#PROZENT=x.xx#`-Zeile je Ziel (bis zu zwei Ziele); **kein** betragsmäßiger Ausweis nötig; spätere Skonto-Zahlung = § 17, **keine** Korrekturrechnung | **MVP** |
+| Rabatt/Aufschlag in E-Rechnung | `AllowanceCharge` je Position (BG-27/28) und je Steuersatz auf Dokumentebene (BG-20/21, Largest-Remainder-Aufteilung); vorzeichen-invariant für Storno/Gutschrift; BT-107/108-Summenfelder | **MVP** |
 | Storno/Korrektur | eindeutiger Bezug zur Ursprungsrechnung (Datum + Nr.); bei E-Rechnung **als E-Rechnung** im Storno-/Korrektur-Rechnungstyp (PDF/Papier **gesperrt**) | **MVP** |
 | Gutschrift (echte, § 14 Abs. 2 S. 5) | „Gutschrift"-Kennzeichnung über Rechnungstyp; vorherige Vereinbarung; B2B-Inland E-Rechnung; Widerspruchs-Status | **Später** |
 | § 14c-Schutz | UI verhindert versehentlichen USt-Ausweis in RC-/§25a-/Kleinunternehmer-Belegen | **MVP** |

@@ -47,6 +47,22 @@ npm run mcp   # MCP-Server (stdio) starten / in Claude Code via .mcp.json einbin
 
 MVP. Was funktioniert: Stammdaten/Kunden/Produkte, Angebots-/Rechnungsmodell, Entwurf→Festschreiben→Storno, PDF- + XRechnung-Export, GoBD-Nummernkreis + Audit. Auf der Roadmap: Mahnwesen-UI, wiederkehrende Rechnungen, ZUGFeRD-Hybrid, DATEV-Export, B2G/Leitweg-ID, OSS/ZM, Multi-User. Siehe [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) (MVP / Stufe 2 / Stufe 3) und die ehrliche Liste der **[bekannten Einschränkungen](docs/LIMITATIONEN.md)**.
 
+## Dokumentworkflow
+
+Angebot → Auftragsbestätigung → Lieferschein → Rechnung, alles verknüpft:
+
+1. **Angebot** anlegen (Entwurf, editierbar), versenden — Status `DRAFT → SENT`.
+2. Auf `ACCEPTED` setzen (oder direkt in eine **Auftragsbestätigung** umwandeln).
+3. In einen **Lieferschein** umwandeln (Mengen aus Angebot/AB, Überlieferung blockiert) und/oder in einen **Rechnungsentwurf**.
+4. Jede Umwandlung wird als Dokumentverknüpfung gespeichert; die **Dokumentkette** (auf jeder Angebots-/Rechnungs-/Lieferschein-Seite sichtbar) zeigt die volle Historie — Angebot → AB → Lieferschein → Rechnung → Zahlungen/Mahnungen.
+5. Der Abrechnungsstand (keine/teilweise/voll) wird aus diesen Verknüpfungen abgeleitet, nicht gespeichert.
+
+Dieselben Aktionen auch per MCP: `convert_document`, `create_delivery_note`, `set_document_status`, `duplicate_document`. Details: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md), Einschränkungen: [docs/LIMITATIONEN.md](docs/LIMITATIONEN.md).
+
+### Angebot online annehmen lassen
+
+Auf der Angebots-Detailseite (`Dokumente → Angebot`) unter „Annahme-Link" einen Link erzeugen — die URL wird **einmalig** angezeigt (Kopieren-Button), danach nicht mehr abrufbar. Der Kunde öffnet den Link ohne Login, sieht Angebot + PDF-Download und kann annehmen oder ablehnen (Name Pflicht, E-Mail/Kommentar optional). Nach der Entscheidung: Status `ACCEPTED`/`REJECTED`, eine interne Benachrichtigungsmail, und je nach Einstellung (**Einstellungen → Dokumente**) automatisch eine Auftragsbestätigung oder ein Rechnungsentwurf. Der Link kann jederzeit widerrufen werden. Für den Platzhalter `{{offer.link}}` in der Angebots-Mailvorlage `APP_BASE_URL` setzen (`.env`) — sonst bleibt er leer.
+
 ## Tech-Stack
 
 Next.js 16 (App Router) · TypeScript (strict) · Prisma 6 · SQLite/PostgreSQL · TailwindCSS · Zod · Vitest.
@@ -75,7 +91,66 @@ cp .env.example .env            # DATABASE_URL auf die postgresql://-Zeile umste
 docker compose up --build
 ```
 
-`docker-compose.yml` startet App + PostgreSQL + den **Mustang**-Sidecar (XRechnung-/ZUGFeRD-Erzeugung & -Validierung). Das Postgres-Schema liegt in `prisma/schema.postgres.prisma` (modellidentisch, nur andere Datasource).
+**Bestehende Instanz aktualisieren.** Wurde die Datenbank mit einer älteren Version
+per `prisma db push` angelegt, fehlt ihr die Migrationshistorie. Der Container
+startet dann nicht, sondern nennt den einmalig nötigen Befehl. Vorher ein Backup
+ziehen.
+
+**`migrate resolve` nicht blind ausfuehren.** Die Baseline `0_init` bildet den
+aktuellen Stand ab, inklusive `RecurringInvoice`, `RecurringInvoiceLine` und
+`Invoice.recurringInvoiceId`. Eine ältere Bestandsinstanz kennt diese Tabellen und
+Spalten unter Umständen nicht. Wird die Baseline ungeprüft als angewendet
+markiert, glaubt Prisma, das Schema sei vollständig, und spätere Abfragen
+scheitern mit `column ... does not exist`. Vorher prüfen:
+
+```bash
+docker compose run --rm app \
+  npx prisma migrate diff --from-url "$DATABASE_URL" \
+    --to-schema-datamodel prisma/schema.postgres.prisma --script
+```
+
+**Wichtig:** `--to-schema-datamodel` vergleicht gegen den aktuellen Modellstand
+(Head), nicht gegen die Baseline `0_init`. Referenz für den Baseline-Stand ist
+ausschließlich `prisma/migrations-postgres/0_init/migration.sql`. Der Diff kann
+daher auch Tabellen oder Spalten zeigen, die erst in einer **späteren**
+Migration unter `prisma/migrations-postgres/` eingeführt wurden (z. B. die
+Phase-0-Snapshot-Spalten) — diese gehören **nicht** von Hand eingespielt,
+sondern werden nach dem `resolve` automatisch von `migrate deploy` nachgezogen.
+Ob eine Spalte/Tabelle zur Baseline gehört, zeigt
+`grep -l "<spaltenname>" prisma/migrations-postgres/*/migration.sql`: taucht sie
+nur in `0_init` auf, gehört sie zur Baseline; taucht sie (auch) in einer
+späteren Migration auf, stammt sie von dort und wird nicht per Hand angelegt.
+
+- **Ausgabe leer** (nur der Kommentar "This is an empty migration"): die
+  Datenbank entspricht bereits der Baseline. `migrate resolve --applied 0_init`
+  unten ist sicher.
+- **Ausgabe enthält nur `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN` /
+  `CREATE INDEX` / `ALTER TABLE … ADD CONSTRAINT` (Fremdschlüssel)**: nur die
+  Anweisungen einspielen, die zu `0_init` gehören (siehe `grep`-Regel oben);
+  Anweisungen zu Spalten/Tabellen aus späteren Migrationen weglassen. Geprüftes
+  SQL mit `docker compose run --rm app npx prisma db execute --url
+  "$DATABASE_URL" --stdin` einspielen, danach mit `migrate resolve` fortfahren.
+- **Ausgabe enthält irgendein `DROP`**: abbrechen. Nicht anwenden, kein
+  `migrate resolve` ausführen. Die Datenbank enthält Daten, die die Baseline
+  nicht kennt — vorher Rücksprache halten.
+
+Ist der Diff sauber (oder wurde eingespielt):
+
+```bash
+docker compose run --rm app \
+  npx prisma migrate resolve --config prisma.postgres.config.ts --applied 0_init
+```
+
+Danach startet der Container normal; künftige Schemaänderungen laufen über
+`prisma migrate deploy`.
+
+**Ist ein Migrationseintrag in `_prisma_migrations` als fehlgeschlagen markiert**,
+verweigert `migrate deploy` die Ausführung und der Container startet nicht. Das
+ist gewollt (fail-closed) statt bei unsicherem Schemazustand einfach
+weiterzulaufen. Prüfen, was die Migration teilweise angerichtet hat, dann mit
+`prisma migrate resolve --rolled-back <name>` auflösen.
+
+`docker-compose.yml` startet App + PostgreSQL. Der **Mustang**-Sidecar (XRechnung-/ZUGFeRD-Erzeugung & -Validierung) ist ein optionaler, auskommentierter Block (`einvoice-service/` wird nicht mitgeliefert) — siehe Abschnitt oben. Das Postgres-Schema liegt in `prisma/schema.postgres.prisma` (modellidentisch, nur andere Datasource).
 
 ## Tests
 

@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbInternal } from "@/lib/db";
 import { getActiveOrg } from "@/lib/org";
+import { ensureOrgMasterdata } from "@/domain/masterdata/ensure";
 import { organizationSchema, customerSchema, productSchema } from "@/schemas";
 import { parseEuroToCents } from "@/lib/money";
 import type { ActionResult } from "./result";
@@ -65,8 +66,11 @@ export async function saveOrganization(_prev: ActionResult, fd: FormData): Promi
 
   try {
     const existing = await dbInternal.organization.findFirst();
-    if (existing) await dbInternal.organization.update({ where: { id: existing.id }, data });
-    else await dbInternal.organization.create({ data });
+    const org = existing
+      ? await dbInternal.organization.update({ where: { id: existing.id }, data })
+      : await dbInternal.organization.create({ data });
+    // idempotent: Bestandsorganisationen ohne Systemdaten bekommen sie beim naechsten Speichern
+    await ensureOrgMasterdata(dbInternal, org.id);
   } catch (e) {
     console.error("saveOrganization:", e);
     return { ok: false, error: "Speichern fehlgeschlagen." };
@@ -94,6 +98,7 @@ export async function saveCustomer(_prev: ActionResult, fd: FormData): Promise<A
     leitwegId: str(fd, "leitwegId"),
     peppolId: str(fd, "peppolId"),
     defaultPaymentTermsDays: Number(str(fd, "defaultPaymentTermsDays") ?? "14"),
+    defaultPaymentMethodId: str(fd, "defaultPaymentMethodId"),
     notes: str(fd, "notes"),
   });
   if (!parsed.success) return { ok: false, error: firstError(parsed.error.issues) };
@@ -101,6 +106,18 @@ export async function saveCustomer(_prev: ActionResult, fd: FormData): Promise<A
 
   try {
     const org = await getActiveOrg();
+    // G — defaultPaymentMethodId kam ungeprueft aus dem Formular: eine fremde
+    // Organisation haette (per manipuliertem Request) die ID einer Zahlungsmethode
+    // einer ANDEREN Organisation eintragen koennen (Prisma prueft nur, dass die ID
+    // existiert, nicht die orgId). Jetzt Mandanten-Pruefung wie bei allen anderen
+    // Fremdschluessel-Feldern.
+    if (v.defaultPaymentMethodId) {
+      const method = await dbInternal.paymentMethod.findFirst({
+        where: { id: v.defaultPaymentMethodId, orgId: org.id },
+        select: { id: true },
+      });
+      if (!method) return { ok: false, error: "Zahlungsmethode nicht gefunden." };
+    }
     const data = {
       type: v.type,
       name: v.name,
@@ -115,6 +132,7 @@ export async function saveCustomer(_prev: ActionResult, fd: FormData): Promise<A
       vatId: v.vatId ?? null,
       leitwegId: v.leitwegId ?? null,
       defaultPaymentTermsDays: v.defaultPaymentTermsDays,
+      defaultPaymentMethodId: v.defaultPaymentMethodId ?? null,
       notes: v.notes ?? null,
     };
     // peppolId wird (mangels Formularfeld) NICHT geschrieben, damit ein bestehender Wert beim Bearbeiten erhalten bleibt.

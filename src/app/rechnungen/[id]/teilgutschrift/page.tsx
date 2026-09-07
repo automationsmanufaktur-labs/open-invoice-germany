@@ -1,14 +1,16 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
+import { getActiveOrg } from "@/lib/org";
 import { PartialCreditForm } from "@/components/PartialCreditForm";
 
 export const dynamic = "force-dynamic";
 
 export default async function TeilgutschriftPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const inv = await prisma.invoice.findUnique({
-    where: { id },
+  const org = await getActiveOrg();
+  const inv = await prisma.invoice.findFirst({
+    where: { id, orgId: org.id },
     include: { lines: { orderBy: { position: "asc" } } },
   });
   if (!inv) notFound();

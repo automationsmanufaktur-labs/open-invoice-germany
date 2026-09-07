@@ -6,6 +6,7 @@
  * Rundungsdifferenzen zwischen Summe-der-Positionen und Gesamtsteuer.
  */
 import { roundHalfUp } from "./money";
+import { applyDocumentAdjustments, type DocumentAdjustments, type RateBucket } from "./pricing/allocate";
 
 /** UNTDID-5305 Steuerkategorie-Codes (Teilmenge). */
 export type TaxCategory =
@@ -26,8 +27,15 @@ export interface TaxLineInput {
 export interface TaxBreakdownEntry {
   taxCategory: string;
   taxRate: number;
+  /** Netto NACH Belegrabatt/-aufschlag — Bemessungsgrundlage der Steuer. */
   netCents: number;
   taxCents: number;
+  /** Netto VOR Belegrabatt/-aufschlag (Summe der Positionsnetti dieser Gruppe). */
+  baseNetCents: number;
+  /** Anteiliger Belegrabatt dieser Gruppe (Largest-Remainder-Aufteilung). */
+  allowanceCents: number;
+  /** Anteiliger Belegaufschlag dieser Gruppe (Largest-Remainder-Aufteilung). */
+  chargeCents: number;
 }
 
 export interface TaxTotals {
@@ -35,10 +43,26 @@ export interface TaxTotals {
   taxTotalCents: number;
   grossTotalCents: number;
   breakdown: TaxBreakdownEntry[];
+  /** Σ Positionsnetti vor jeder Beleganpassung. */
+  lineTotalCents: number;
+  /** Σ Belegrabatt über alle Gruppen. */
+  allowanceTotalCents: number;
+  /** Σ Belegaufschlag über alle Gruppen. */
+  chargeTotalCents: number;
 }
 
-export function computeTaxBreakdown(lines: readonly TaxLineInput[]): TaxTotals {
-  const groups = new Map<string, TaxBreakdownEntry>();
+/**
+ * Gruppiert Positionen nach (Steuersatz, -kategorie), wendet optional einen
+ * Belegrabatt/-aufschlag proportional je Gruppe an (`applyDocumentAdjustments`)
+ * und berechnet die Steuer je Gruppe = round(adjustedNet * taxRate / 100).
+ * Ohne `adjustments` ist das Ergebnis byte-gleich zum bisherigen Verhalten,
+ * da ein leeres `DocumentAdjustments` zu Allowance/Charge = 0 führt.
+ */
+export function computeTaxBreakdown(
+  lines: readonly TaxLineInput[],
+  adjustments?: DocumentAdjustments,
+): TaxTotals {
+  const groups = new Map<string, RateBucket>();
 
   for (const line of lines) {
     const key = `${line.taxCategory}:${line.taxRate}`;
@@ -47,23 +71,39 @@ export function computeTaxBreakdown(lines: readonly TaxLineInput[]): TaxTotals {
       existing.netCents += line.lineNetCents;
     } else {
       groups.set(key, {
+        key,
         taxCategory: String(line.taxCategory),
         taxRate: line.taxRate,
         netCents: line.lineNetCents,
-        taxCents: 0,
       });
     }
   }
 
+  const buckets = [...groups.values()];
+  const lineTotalCents = buckets.reduce((s, b) => s + b.netCents, 0);
+  const adjusted = applyDocumentAdjustments(buckets, adjustments ?? {});
+
   let netTotalCents = 0;
   let taxTotalCents = 0;
+  let allowanceTotalCents = 0;
+  let chargeTotalCents = 0;
   const breakdown: TaxBreakdownEntry[] = [];
 
-  for (const group of groups.values()) {
-    group.taxCents = roundHalfUp((group.netCents * group.taxRate) / 100);
-    netTotalCents += group.netCents;
-    taxTotalCents += group.taxCents;
-    breakdown.push(group);
+  for (const b of adjusted) {
+    const taxCents = roundHalfUp((b.adjustedNetCents * b.taxRate) / 100);
+    netTotalCents += b.adjustedNetCents;
+    taxTotalCents += taxCents;
+    allowanceTotalCents += b.allowanceCents;
+    chargeTotalCents += b.chargeCents;
+    breakdown.push({
+      taxCategory: b.taxCategory,
+      taxRate: b.taxRate,
+      netCents: b.adjustedNetCents,
+      taxCents,
+      baseNetCents: b.netCents,
+      allowanceCents: b.allowanceCents,
+      chargeCents: b.chargeCents,
+    });
   }
 
   breakdown.sort(
@@ -75,6 +115,9 @@ export function computeTaxBreakdown(lines: readonly TaxLineInput[]): TaxTotals {
     taxTotalCents,
     grossTotalCents: netTotalCents + taxTotalCents,
     breakdown,
+    lineTotalCents,
+    allowanceTotalCents,
+    chargeTotalCents,
   };
 }
 

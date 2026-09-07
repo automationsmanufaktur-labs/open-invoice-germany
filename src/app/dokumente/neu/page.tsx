@@ -14,14 +14,27 @@ export default async function NeuesDokumentPage() {
     return <NeedOrgNotice />;
   }
 
-  const [customers, products] = await Promise.all([
+  const [customers, products, contactRows, addressRows] = await Promise.all([
     dbInternal.customer.findMany({ where: { orgId, isArchived: false }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
     dbInternal.product.findMany({
       where: { orgId, isArchived: false },
       select: { id: true, name: true, unit: true, netPriceCents: true, taxRate: true },
       orderBy: { name: "asc" },
     }),
+    dbInternal.contactPerson.findMany({ where: { orgId }, orderBy: { lastName: "asc" } }),
+    dbInternal.customerAddress.findMany({ where: { orgId }, orderBy: { label: "asc" } }),
   ]);
+
+  const contacts = contactRows.map((c) => ({
+    id: c.id,
+    customerId: c.customerId,
+    label: `${c.firstName} ${c.lastName}${c.role ? ` (${c.role})` : ""}`,
+  }));
+  const addresses = addressRows.map((a) => ({
+    id: a.id,
+    customerId: a.customerId,
+    label: a.label ? `${a.label} — ${a.addressLine1}, ${a.postalCode} ${a.city}` : `${a.addressLine1}, ${a.postalCode} ${a.city}`,
+  }));
 
   if (customers.length === 0) {
     return (
@@ -43,7 +56,7 @@ export default async function NeuesDokumentPage() {
         </Link>
         <h1 className="text-2xl font-bold tracking-tight">Neues Dokument</h1>
       </div>
-      <NewDocumentForm customers={customers} products={products} />
+      <NewDocumentForm customers={customers} products={products} contacts={contacts} addresses={addresses} />
     </div>
   );
 }

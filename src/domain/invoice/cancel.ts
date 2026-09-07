@@ -8,6 +8,7 @@
  */
 import { dbInternal } from "@/lib/db";
 import { appendChangeLog } from "@/domain/audit";
+import { linkDocuments } from "@/domain/relations";
 import { finalizeWithinTx } from "./finalize";
 
 export class CancelError extends Error {
@@ -52,6 +53,14 @@ export async function cancelInvoice(invoiceId: string, opts: CancelOptions = {})
         notes: `Storno zu Rechnung ${original.number}.${original.notes ? " " + original.notes : ""}`,
         paymentTerms: original.paymentTerms,
         correctsInvoiceId: original.id,
+        // Beleg-Rabatt/-Aufschlag unveraendert (positiv) uebernehmen — applyDocumentAdjustments
+        // ist vorzeichen-invariant und rechnet bei ausschliesslich negativen Zeilen-Buckets auf
+        // den negierten (positiven) Betraegen wie im Original (Ruling Task-1-Review).
+        documentDiscountPermille: original.documentDiscountPermille,
+        documentDiscountCents: original.documentDiscountCents,
+        documentChargePermille: original.documentChargePermille,
+        documentChargeCents: original.documentChargeCents,
+        documentChargeReason: original.documentChargeReason,
         // Betragsspiegelbild: negierte Beträge, damit Original + Storno = 0 ergibt.
         lines: {
           create: original.lines.map((l) => ({
@@ -64,18 +73,27 @@ export async function cancelInvoice(invoiceId: string, opts: CancelOptions = {})
             taxRate: l.taxRate,
             taxCategory: l.taxCategory,
             discountPermille: l.discountPermille,
+            discountCents: l.discountCents,
             lineNetCents: -l.lineNetCents,
           })),
         },
       },
     });
 
-    const finalizedCredit = await finalizeWithinTx(tx, credit.id, { actor, now });
+    const finalizedCredit = await finalizeWithinTx(tx, credit.id, {
+      actor,
+      now,
+      // Storno berichtigt genau das Original: gleicher Empfaenger/Verkaeufer wie dort.
+      inheritSnapshotFrom: { sellerSnapshotJson: original.sellerSnapshotJson, buyerSnapshotJson: original.buyerSnapshotJson },
+    });
 
     await tx.invoice.update({
       where: { id: original.id },
       data: { status: "CANCELLED", reversedByInvoiceId: finalizedCredit.id },
     });
+
+    await linkDocuments(tx, { orgId: original.orgId, fromType: "INVOICE", fromId: finalizedCredit.id, toType: "INVOICE", toId: original.id, relationType: "REVERSES" });
+    await linkDocuments(tx, { orgId: original.orgId, fromType: "INVOICE", fromId: finalizedCredit.id, toType: "INVOICE", toId: original.id, relationType: "CORRECTS" });
 
     await appendChangeLog(tx, {
       orgId: original.orgId,
