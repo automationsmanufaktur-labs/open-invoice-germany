@@ -1,12 +1,22 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
-import { formatCents, formatQuantity } from "@/lib/money";
+import { getActiveOrg } from "@/lib/org";
+import { formatCents } from "@/lib/money";
 import { StatusBadge } from "@/components/StatusBadge";
 import { finalizeAction, cancelAction } from "@/app/actions/invoices";
 import { PaymentForm } from "@/components/PaymentForm";
+import { listPaymentMethods } from "@/domain/payment-method/manage";
 import { DunningButton } from "@/components/DunningButton";
+import { SendEmailDialog } from "@/components/SendEmailDialog";
+import { EmailHistory } from "@/components/EmailHistory";
+import { ConvertMenu } from "@/components/ConvertMenu";
+import { DocumentChain } from "@/components/DocumentChain";
 import { DUNNING_LEVEL_TITLE } from "@/lib/dunning";
+import type { EmailDocType } from "@/schemas/email";
+import { AttachmentPanel } from "@/components/AttachmentPanel";
+import { listAttachments } from "@/domain/attachment/manage";
+import { LineItemsTable } from "@/components/LineItemsTable";
 
 export const dynamic = "force-dynamic";
 
@@ -30,26 +40,57 @@ export default async function InvoiceDetail({
   const { id } = await params;
   const { error } = await searchParams;
 
-  const invoice = await prisma.invoice.findUnique({
-    where: { id },
+  const org = await getActiveOrg();
+  // G7 (Fix-Runde 2): findUnique(id) ohne orgId erlaubte fremden Organisationen den Zugriff
+  // auf eine Rechnungsseite ueber die reine ID — jetzt mandantengeprueft.
+  const invoice = await prisma.invoice.findFirst({
+    where: { id, orgId: org.id },
     include: {
       lines: { orderBy: { position: "asc" } },
-      customer: true,
+      customer: { include: { defaultPaymentMethod: true } },
       org: true,
-      payments: true,
+      payments: { orderBy: { paidAt: "asc" } },
       dunnings: { orderBy: { level: "asc" } },
+      paymentMethod: true,
     },
   });
   if (!invoice) notFound();
 
   const isDraft = invoice.status === "DRAFT";
   const isCancelled = invoice.status === "CANCELLED";
-  const breakdown = JSON.parse(invoice.taxBreakdownJson) as Array<{ taxRate: number; netCents: number; taxCents: number }>;
+  const breakdown = JSON.parse(invoice.taxBreakdownJson) as Array<{
+    taxRate: number;
+    netCents: number;
+    taxCents: number;
+    allowanceCents?: number;
+    chargeCents?: number;
+  }>;
+  const hasDocumentAdjustment =
+    invoice.documentDiscountPermille > 0 ||
+    invoice.documentDiscountCents > 0 ||
+    invoice.documentChargePermille > 0 ||
+    invoice.documentChargeCents > 0;
+  const documentDiscountTotalCents = breakdown.reduce((s, b) => s + (b.allowanceCents ?? 0), 0);
+  const documentChargeTotalCents = breakdown.reduce((s, b) => s + (b.chargeCents ?? 0), 0);
+  const hasSkonto = invoice.skonto1Permille != null && invoice.skonto1Days != null;
+  const paymentMethodName = invoice.paymentMethodSnapshotJson
+    ? (JSON.parse(invoice.paymentMethodSnapshotJson) as { name: string }).name
+    : (invoice.paymentMethod?.name ?? null);
   const isInvoiceType = invoice.type === "INVOICE" || invoice.type === "CORRECTION";
   const openCents = invoice.grossTotalCents - invoice.paidAmountCents;
   const dueDate = invoice.dueDate ?? invoice.issueDate;
   const isOverdue = !isDraft && !isCancelled && openCents > 0 && new Date() > dueDate;
   const canPay = !isDraft && !isCancelled && isInvoiceType && openCents > 0;
+  const emailDocType: EmailDocType = invoice.type === "CREDIT_NOTE" ? "CREDIT_NOTE" : "INVOICE";
+
+  // Zahlungsmethoden-Auswahl im Zahlungsformular: aktive Methoden OHNE den Systemcode
+  // SKONTO (der wird ausschliesslich automatisch bei detectSkonto gebucht, nie manuell
+  // ausgewaehlt). Default-Kette: Kunden-Standard -> Methode der Rechnung -> TRANSFER.
+  const activePaymentMethods = canPay
+    ? (await listPaymentMethods(org.id)).filter((m) => m.isActive && m.code !== "SKONTO")
+    : [];
+  const defaultPaymentMethodCode = invoice.customer.defaultPaymentMethod?.code ?? invoice.paymentMethod?.code ?? "TRANSFER";
+  const attachments = await listAttachments(org.id, "INVOICE", invoice.id);
 
   return (
     <div className="space-y-6">
@@ -62,6 +103,11 @@ export default async function InvoiceDetail({
             {TYPE_TITLE[invoice.type] ?? "Beleg"} {invoice.number ?? "(Entwurf)"}
           </h1>
           <StatusBadge status={invoice.status} />
+          {invoice.snapshotSource === "MIGRATION" && (
+            <span className="inline-block rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+              Adressstand per Migration eingefroren
+            </span>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <a
@@ -89,6 +135,15 @@ export default async function InvoiceDetail({
               ZUGFeRD (PDF)
             </a>
           )}
+          <SendEmailDialog docType={emailDocType} docId={invoice.id} label={isDraft ? "Entwurf per E-Mail senden" : "Per E-Mail senden"} />
+          {isDraft && (
+            <Link
+              href={`/rechnungen/${invoice.id}/bearbeiten`}
+              className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Bearbeiten
+            </Link>
+          )}
           {isDraft && (
             <form action={finalizeAction}>
               <input type="hidden" name="id" value={invoice.id} />
@@ -113,6 +168,7 @@ export default async function InvoiceDetail({
               </button>
             </form>
           )}
+          {!isDraft && !isCancelled && isInvoiceType && <ConvertMenu sourceType="INVOICE" sourceId={invoice.id} showToDeliveryNote />}
         </div>
       </div>
 
@@ -146,38 +202,39 @@ export default async function InvoiceDetail({
             <dd className="text-right">{deDate(invoice.dueDate)}</dd>
             <dt>Steuerschema</dt>
             <dd className="text-right">{invoice.taxScheme}</dd>
+            {paymentMethodName && (
+              <>
+                <dt>Zahlungsmethode</dt>
+                <dd className="text-right">{paymentMethodName}</dd>
+              </>
+            )}
           </dl>
         </div>
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
-            <tr>
-              <th className="px-4 py-2">Beschreibung</th>
-              <th className="px-4 py-2 text-right">Menge</th>
-              <th className="px-4 py-2 text-right">Einzel</th>
-              <th className="px-4 py-2 text-right">USt</th>
-              <th className="px-4 py-2 text-right">Netto</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {invoice.lines.map((l) => (
-              <tr key={l.id}>
-                <td className="px-4 py-2 text-slate-700">{l.description}</td>
-                <td className="tabular px-4 py-2 text-right">
-                  {formatQuantity(l.quantityMilli)} {l.unit}
-                </td>
-                <td className="tabular px-4 py-2 text-right">{formatCents(l.unitNetPriceCents, invoice.currency)}</td>
-                <td className="tabular px-4 py-2 text-right">{l.taxRate}%</td>
-                <td className="tabular px-4 py-2 text-right">{formatCents(l.lineNetCents, invoice.currency)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {invoice.headerText && <p className="whitespace-pre-line text-sm text-slate-700">{invoice.headerText}</p>}
+
+      <LineItemsTable lines={invoice.lines} currency={invoice.currency} />
 
       <div className="ml-auto max-w-xs space-y-1 text-sm">
+        {hasDocumentAdjustment && (
+          <>
+            {/* Gutschriften spiegeln die Betraege (negativ). Anzeige vorzeichenrichtig
+                (analog invoice-pdf.ts); der Grund gehoert nur zum Aufschlag. */}
+            {documentDiscountTotalCents !== 0 && (
+              <div className="flex justify-between text-slate-600">
+                <span>Belegrabatt</span>
+                <span className="tabular">{formatCents(-documentDiscountTotalCents, invoice.currency)}</span>
+              </div>
+            )}
+            {documentChargeTotalCents !== 0 && (
+              <div className="flex justify-between text-slate-600">
+                <span>Belegaufschlag{invoice.documentChargeReason ? ` (${invoice.documentChargeReason})` : ""}</span>
+                <span className="tabular">{formatCents(documentChargeTotalCents, invoice.currency)}</span>
+              </div>
+            )}
+          </>
+        )}
         <div className="flex justify-between">
           <span className="text-slate-600">Netto</span>
           <span className="tabular font-medium">{formatCents(invoice.netTotalCents, invoice.currency)}</span>
@@ -196,7 +253,29 @@ export default async function InvoiceDetail({
         </div>
       </div>
 
+      {hasSkonto && (
+        <div className="ml-auto max-w-xs rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+          <span className="font-medium text-slate-800">Skonto: </span>
+          {(invoice.skonto1Permille! / 10).toString().replace(".", ",")} % bei Zahlung innerhalb {invoice.skonto1Days} Tagen
+          {invoice.skonto2Permille != null && invoice.skonto2Days != null && (
+            <>
+              , {(invoice.skonto2Permille / 10).toString().replace(".", ",")} % innerhalb {invoice.skonto2Days} Tagen
+            </>
+          )}
+          .
+        </div>
+      )}
+
+      {invoice.footerText && <p className="whitespace-pre-line text-sm text-slate-700">{invoice.footerText}</p>}
       {invoice.notes && <p className="text-sm text-slate-600">{invoice.notes}</p>}
+
+      {invoice.internalNotes && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <span className="mr-2 font-medium">Interne Notiz</span>
+          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs">nur intern sichtbar</span>
+          <p className="mt-1 whitespace-pre-line">{invoice.internalNotes}</p>
+        </div>
+      )}
 
       {isInvoiceType && !isDraft && !isCancelled && (
         <section className="space-y-4 rounded-lg border border-slate-200 bg-white p-5">
@@ -209,7 +288,28 @@ export default async function InvoiceDetail({
             </span>
           </div>
 
-          {canPay && <PaymentForm invoiceId={invoice.id} openCents={openCents} />}
+          {canPay && (
+            <PaymentForm
+              invoiceId={invoice.id}
+              openCents={openCents}
+              methods={activePaymentMethods.map((m) => ({ code: m.code, name: m.name }))}
+              defaultMethod={defaultPaymentMethodCode}
+            />
+          )}
+
+          {invoice.payments.length > 0 && (
+            <div className="space-y-1 text-sm">
+              {invoice.payments.map((p) => (
+                <div key={p.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-1 text-slate-600">
+                  <span>
+                    {deDate(p.paidAt)} · {formatCents(p.amountCents, invoice.currency)} · {p.method}
+                    {p.isSkonto && <span className="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-800">Skonto</span>}
+                  </span>
+                  {p.reference && <span className="text-xs text-slate-400">{p.reference}</span>}
+                </div>
+              ))}
+            </div>
+          )}
 
           {openCents > 0 && (
             <div className="flex flex-wrap items-center gap-3">
@@ -221,21 +321,34 @@ export default async function InvoiceDetail({
           {invoice.dunnings.length > 0 && (
             <div className="space-y-1 text-sm">
               {invoice.dunnings.map((d) => (
-                <div key={d.id} className="flex items-center justify-between border-t border-slate-100 pt-1 text-slate-600">
+                <div key={d.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-1 text-slate-600">
                   <span>
                     {DUNNING_LEVEL_TITLE[d.level] ?? `${d.level}. Mahnung`} · {d.number} · {deDate(d.sentAt)}
                     {d.interestAmountCents > 0 ? ` · Zinsen ${formatCents(d.interestAmountCents, invoice.currency)}` : ""}
                     {d.flatFee40Cents > 0 ? ` · Pauschale ${formatCents(d.flatFee40Cents, invoice.currency)}` : ""}
                   </span>
-                  <a href={`/api/dunnings/${d.id}/pdf`} target="_blank" className="text-indigo-600 hover:underline">
-                    PDF
-                  </a>
+                  <div className="flex items-center gap-2">
+                    <a href={`/api/dunnings/${d.id}/pdf`} target="_blank" className="text-indigo-600 hover:underline">
+                      PDF
+                    </a>
+                    <SendEmailDialog docType="DUNNING" docId={d.id} label="Mahnung senden" />
+                  </div>
                 </div>
               ))}
             </div>
           )}
         </section>
       )}
+
+      <AttachmentPanel
+        docType="INVOICE"
+        docId={invoice.id}
+        initial={attachments.map((a) => ({ id: a.id, filename: a.filename, mime: a.mime, sizeBytes: a.sizeBytes }))}
+      />
+
+      <DocumentChain orgId={org.id} type="INVOICE" id={invoice.id} />
+
+      <EmailHistory docType={emailDocType} docId={invoice.id} />
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { dbInternal } from "@/lib/db";
 import { getActiveOrg } from "@/lib/org";
+import { ensureOrgMasterdata } from "@/domain/masterdata/ensure";
 import { organizationSchema, customerSchema, productSchema } from "@/schemas";
 import { parseEuroToCents } from "@/lib/money";
 import type { ActionResult } from "./result";
@@ -65,8 +66,11 @@ export async function saveOrganization(_prev: ActionResult, fd: FormData): Promi
 
   try {
     const existing = await dbInternal.organization.findFirst();
-    if (existing) await dbInternal.organization.update({ where: { id: existing.id }, data });
-    else await dbInternal.organization.create({ data });
+    const org = existing
+      ? await dbInternal.organization.update({ where: { id: existing.id }, data })
+      : await dbInternal.organization.create({ data });
+    // idempotent: Bestandsorganisationen ohne Systemdaten bekommen sie beim naechsten Speichern
+    await ensureOrgMasterdata(dbInternal, org.id);
   } catch (e) {
     console.error("saveOrganization:", e);
     return { ok: false, error: "Speichern fehlgeschlagen." };
@@ -94,6 +98,7 @@ export async function saveCustomer(_prev: ActionResult, fd: FormData): Promise<A
     leitwegId: str(fd, "leitwegId"),
     peppolId: str(fd, "peppolId"),
     defaultPaymentTermsDays: Number(str(fd, "defaultPaymentTermsDays") ?? "14"),
+    defaultPaymentMethodId: str(fd, "defaultPaymentMethodId"),
     notes: str(fd, "notes"),
   });
   if (!parsed.success) return { ok: false, error: firstError(parsed.error.issues) };
@@ -101,6 +106,18 @@ export async function saveCustomer(_prev: ActionResult, fd: FormData): Promise<A
 
   try {
     const org = await getActiveOrg();
+    // G — defaultPaymentMethodId kam ungeprueft aus dem Formular: eine fremde
+    // Organisation haette (per manipuliertem Request) die ID einer Zahlungsmethode
+    // einer ANDEREN Organisation eintragen koennen (Prisma prueft nur, dass die ID
+    // existiert, nicht die orgId). Jetzt Mandanten-Pruefung wie bei allen anderen
+    // Fremdschluessel-Feldern.
+    if (v.defaultPaymentMethodId) {
+      const method = await dbInternal.paymentMethod.findFirst({
+        where: { id: v.defaultPaymentMethodId, orgId: org.id },
+        select: { id: true },
+      });
+      if (!method) return { ok: false, error: "Zahlungsmethode nicht gefunden." };
+    }
     const data = {
       type: v.type,
       name: v.name,
@@ -115,6 +132,7 @@ export async function saveCustomer(_prev: ActionResult, fd: FormData): Promise<A
       vatId: v.vatId ?? null,
       leitwegId: v.leitwegId ?? null,
       defaultPaymentTermsDays: v.defaultPaymentTermsDays,
+      defaultPaymentMethodId: v.defaultPaymentMethodId ?? null,
       notes: v.notes ?? null,
     };
     // peppolId wird (mangels Formularfeld) NICHT geschrieben, damit ein bestehender Wert beim Bearbeiten erhalten bleibt.
@@ -154,6 +172,7 @@ export async function saveProduct(_prev: ActionResult, fd: FormData): Promise<Ac
   const parsed = productSchema.safeParse({
     name: str(fd, "name"),
     description: str(fd, "description"),
+    articleNumber: str(fd, "articleNumber"),
     unit: str(fd, "unit") ?? "C62",
     netPriceCents,
     taxRate,
@@ -168,6 +187,7 @@ export async function saveProduct(_prev: ActionResult, fd: FormData): Promise<Ac
     const data = {
       name: v.name,
       description: v.description ?? null,
+      articleNumber: v.articleNumber ?? null,
       unit: v.unit,
       netPriceCents: v.netPriceCents,
       taxRate: v.taxRate,
@@ -186,6 +206,68 @@ export async function saveProduct(_prev: ActionResult, fd: FormData): Promise<Ac
   }
   revalidatePath("/produkte");
   redirect("/produkte");
+}
+
+export interface CreateProductInlineInput {
+  name: string;
+  description?: string;
+  articleNumber?: string;
+  unit: string;
+  netPrice: string; // Euro, Komma oder Punkt (wie ProductForm)
+  taxRate: number;
+  differential: boolean;
+}
+export type CreateProductInlineResult =
+  | { ok: true; product: { id: string; name: string; unit: string; netPriceCents: number; taxRate: number } }
+  | { ok: false; error: string };
+
+/**
+ * Inline-Anlage eines Produkts aus dem Positions-Editor (Phase 4b, Produkt-Picker
+ * „Neues Produkt"). Nutzt dieselbe Domain/Zod wie saveProduct — anders als saveProduct
+ * jedoch KEIN redirect, sondern Rueckgabe des angelegten Produkts, damit der Aufrufer
+ * es sofort in die gerade bearbeitete Position uebernehmen kann.
+ */
+export async function createProductInline(input: CreateProductInlineInput): Promise<CreateProductInlineResult> {
+  let netPriceCents: number;
+  try {
+    netPriceCents = parseEuroToCents(input.netPrice);
+  } catch {
+    return { ok: false, error: "Ungültiger Nettopreis." };
+  }
+  const parsed = productSchema.safeParse({
+    name: input.name,
+    description: input.description,
+    articleNumber: input.articleNumber,
+    unit: input.unit || "C62",
+    netPriceCents,
+    taxRate: input.taxRate,
+    taxCategory: input.taxRate === 0 ? "Z" : "S",
+    differential: input.differential,
+  });
+  if (!parsed.success) return { ok: false, error: firstError(parsed.error.issues) };
+  const v = parsed.data;
+
+  try {
+    const org = await getActiveOrg();
+    const product = await dbInternal.product.create({
+      data: {
+        orgId: org.id,
+        name: v.name,
+        description: v.description ?? null,
+        articleNumber: v.articleNumber ?? null,
+        unit: v.unit,
+        netPriceCents: v.netPriceCents,
+        taxRate: v.taxRate,
+        taxCategory: v.taxCategory,
+        differential: v.differential,
+      },
+    });
+    revalidatePath("/produkte");
+    return { ok: true, product: { id: product.id, name: product.name, unit: product.unit, netPriceCents: product.netPriceCents, taxRate: product.taxRate } };
+  } catch (e) {
+    console.error("createProductInline:", e);
+    return { ok: false, error: "Speichern fehlgeschlagen." };
+  }
 }
 
 export async function archiveProduct(fd: FormData): Promise<void> {

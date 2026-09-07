@@ -12,6 +12,43 @@ npm run db:seed
 npm run dev
 ```
 
+Schemaänderungen betreffen **beide** Schemadateien. `prisma/schema.postgres.prisma`
+unterscheidet sich von `prisma/schema.prisma` nur in der Provider-Zeile und wird
+abgeleitet:
+
+```bash
+sed 's/provider = "sqlite"/provider = "postgresql"/' prisma/schema.prisma \
+  > prisma/schema.postgres.prisma
+```
+
+Danach je eine Migration pro Provider erzeugen. Für SQLite genügt:
+
+```bash
+npm run db:migrate -- --name <beschreibung>
+```
+
+Für PostgreSQL braucht es eine vom Host erreichbare Datenbank. Der `db`-Service in
+`docker-compose.yml` veröffentlicht bewusst keinen Port (er läuft mit
+`POSTGRES_HOST_AUTH_METHOD: trust`), deshalb dafür einen Wegwerf-Container nutzen:
+
+```bash
+docker run -d --name oig-migrate \
+  -e POSTGRES_USER=oig -e POSTGRES_PASSWORD=test -e POSTGRES_DB=openinvoice \
+  -p 55432:5432 postgres:16-alpine
+export DATABASE_URL="postgresql://oig:test@localhost:55432/openinvoice?schema=public"
+npx prisma migrate deploy --config prisma.postgres.config.ts   # Baseline anwenden
+npm run db:migrate:pg -- --name <beschreibung>
+docker rm -f oig-migrate
+```
+
+`migrate dev` erzeugt am Ende den Prisma-Client neu. Weil beide Schemadateien in
+denselben Pfad (`src/generated/prisma`) generieren, ruft `db:migrate:pg` über
+`scripts/migrate-postgres.sh` anschließend `prisma generate` auf und stellt den
+SQLite-Client wieder her — sonst schlagen danach `npm test` und `npm run dev` mit
+einem irreführenden Protokollfehler fehl.
+
+Der CI-Job `schema-drift` schlägt fehl, wenn die beiden Dateien auseinanderlaufen.
+
 ## Vor jedem Pull Request
 
 ```bash

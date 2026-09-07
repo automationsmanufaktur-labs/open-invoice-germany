@@ -8,7 +8,11 @@
  */
 import { dbInternal } from "@/lib/db";
 import { appendChangeLog } from "@/domain/audit";
+import { linkDocuments } from "@/domain/relations";
 import { finalizeWithinTx } from "./finalize";
+
+/** Zeilentypen, die keinen Betrag tragen (§8: HEADING/TEXT/SUBTOTAL nie in Summen/XML). */
+const NON_ITEM_LINE_TYPES = new Set(["HEADING", "TEXT", "SUBTOTAL"]);
 
 export class CancelError extends Error {
   constructor(message: string) {
@@ -52,30 +56,55 @@ export async function cancelInvoice(invoiceId: string, opts: CancelOptions = {})
         notes: `Storno zu Rechnung ${original.number}.${original.notes ? " " + original.notes : ""}`,
         paymentTerms: original.paymentTerms,
         correctsInvoiceId: original.id,
+        // Beleg-Rabatt/-Aufschlag unveraendert (positiv) uebernehmen — applyDocumentAdjustments
+        // ist vorzeichen-invariant und rechnet bei ausschliesslich negativen Zeilen-Buckets auf
+        // den negierten (positiven) Betraegen wie im Original (Ruling Task-1-Review).
+        documentDiscountPermille: original.documentDiscountPermille,
+        documentDiscountCents: original.documentDiscountCents,
+        documentChargePermille: original.documentChargePermille,
+        documentChargeCents: original.documentChargeCents,
+        documentChargeReason: original.documentChargeReason,
         // Betragsspiegelbild: negierte Beträge, damit Original + Storno = 0 ergibt.
+        // Zeilentyp/Langtext/Artikelnummer 1:1 uebernehmen (§8: die Struktur der Rechnung
+        // bleibt im Storno erkennbar). Nicht-ITEM-Zeilen tragen weiterhin keine Betraege.
         lines: {
-          create: original.lines.map((l) => ({
-            position: l.position,
-            productId: l.productId,
-            description: l.description,
-            quantityMilli: l.quantityMilli,
-            unit: l.unit,
-            unitNetPriceCents: -l.unitNetPriceCents,
-            taxRate: l.taxRate,
-            taxCategory: l.taxCategory,
-            discountPermille: l.discountPermille,
-            lineNetCents: -l.lineNetCents,
-          })),
+          create: original.lines.map((l) => {
+            const isItem = !NON_ITEM_LINE_TYPES.has(l.lineType);
+            return {
+              position: l.position,
+              lineType: l.lineType,
+              productId: l.productId,
+              description: l.description,
+              descriptionLong: l.descriptionLong,
+              articleNumber: l.articleNumber,
+              quantityMilli: l.quantityMilli,
+              unit: l.unit,
+              unitNetPriceCents: isItem ? -l.unitNetPriceCents : 0,
+              taxRate: l.taxRate,
+              taxCategory: l.taxCategory,
+              discountPermille: l.discountPermille,
+              discountCents: l.discountCents,
+              lineNetCents: isItem ? -l.lineNetCents : 0,
+            };
+          }),
         },
       },
     });
 
-    const finalizedCredit = await finalizeWithinTx(tx, credit.id, { actor, now });
+    const finalizedCredit = await finalizeWithinTx(tx, credit.id, {
+      actor,
+      now,
+      // Storno berichtigt genau das Original: gleicher Empfaenger/Verkaeufer wie dort.
+      inheritSnapshotFrom: { sellerSnapshotJson: original.sellerSnapshotJson, buyerSnapshotJson: original.buyerSnapshotJson },
+    });
 
     await tx.invoice.update({
       where: { id: original.id },
       data: { status: "CANCELLED", reversedByInvoiceId: finalizedCredit.id },
     });
+
+    await linkDocuments(tx, { orgId: original.orgId, fromType: "INVOICE", fromId: finalizedCredit.id, toType: "INVOICE", toId: original.id, relationType: "REVERSES" });
+    await linkDocuments(tx, { orgId: original.orgId, fromType: "INVOICE", fromId: finalizedCredit.id, toType: "INVOICE", toId: original.id, relationType: "CORRECTS" });
 
     await appendChangeLog(tx, {
       orgId: original.orgId,

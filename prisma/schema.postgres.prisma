@@ -18,21 +18,21 @@ datasource db {
 
 /// Ausstellender Unternehmer (Mandant). Tenancy-Diskriminator orgId auf allen Belegtabellen.
 model Organization {
-  id                String  @id @default(cuid())
+  id                String   @id @default(cuid())
   legalName         String
   addressLine1      String
   addressLine2      String?
   postalCode        String
   city              String
-  country           String  @default("DE")
+  country           String   @default("DE")
   email             String?
   phone             String?
   website           String?
   taxNumber         String? // Steuernummer (§14 Abs.4 Nr.2)
   vatId             String? // USt-IdNr. (§14 Abs.4 Nr.2)
   kuIdNr            String? // §19a Kleinunternehmer-IdNr.
-  smallBusiness     Boolean @default(false) // §19 UStG
-  defaultTaxScheme  String  @default("REGULAR") // REGULAR | KLEINUNTERNEHMER | DIFFERENZ
+  smallBusiness     Boolean  @default(false) // §19 UStG
+  defaultTaxScheme  String   @default("REGULAR") // REGULAR | KLEINUNTERNEHMER | DIFFERENZ
   iban              String?
   bic               String?
   bankName          String?
@@ -45,75 +45,96 @@ model Organization {
   products     Product[]
   quotes       Quote[]
   invoices     Invoice[]
+  recurring    RecurringInvoice[]
   numberRanges NumberRange[]
   changeLogs   ChangeLog[]
-  recurring    RecurringInvoice[]
+
+  documentRelations   DocumentRelation[]
+  deliveryNotes       DeliveryNote[]
+  textTemplates       TextTemplate[]
+  emailTemplates      EmailTemplate[]
+  emailLogs           EmailLog[]
+  customerAddresses   CustomerAddress[]
+  contactPersons      ContactPerson[]
+  paymentMethods      PaymentMethod[]
+  dunningStages       DunningStage[]
+  mailSettings        MailSettings?
+  documentSettings    DocumentSettings?
+  documentAttachments DocumentAttachment[]
 }
 
 /// Kunde / Leistungsempfänger.
 model Customer {
-  id                      String    @id @default(cuid())
+  id                      String       @id @default(cuid())
   orgId                   String
   org                     Organization @relation(fields: [orgId], references: [id])
-  type                    String    @default("BUSINESS") // BUSINESS | CONSUMER
+  type                    String       @default("BUSINESS") // BUSINESS | CONSUMER
   name                    String
   contactName             String?
   addressLine1            String
   addressLine2            String?
   postalCode              String
   city                    String
-  countryCode             String    @default("DE")
+  countryCode             String       @default("DE")
   email                   String?
   phone                   String?
   vatId                   String?
   vatIdValidatedAt        DateTime? // §18e / VIES qualifizierte Bestätigung
-  leitwegId               String?   // B2G, BT-10
+  leitwegId               String? // B2G, BT-10
   peppolId                String?
-  defaultPaymentTermsDays Int       @default(14)
+  defaultPaymentTermsDays Int          @default(14)
   notes                   String?
-  isArchived              Boolean   @default(false) // Soft-Delete; kein Hard-Delete bei Belegbezug (DSGVO vs. §147 AO)
-  createdAt               DateTime  @default(now())
-  updatedAt               DateTime  @updatedAt
+  isArchived              Boolean      @default(false) // Soft-Delete; kein Hard-Delete bei Belegbezug (DSGVO vs. §147 AO)
+  createdAt               DateTime     @default(now())
+  updatedAt               DateTime     @updatedAt
 
-  quotes   Quote[]
-  invoices Invoice[]
+  quotes    Quote[]
+  invoices  Invoice[]
   recurring RecurringInvoice[]
+
+  addresses              CustomerAddress[]
+  contacts               ContactPerson[]
+  deliveryNotes          DeliveryNote[]
+  defaultPaymentMethodId String?
+  defaultPaymentMethod   PaymentMethod?    @relation(fields: [defaultPaymentMethodId], references: [id])
 
   @@index([orgId])
 }
 
 /// Produkt/Leistung im Katalog (kein Beleg, frei editierbar).
 model Product {
-  id            String  @id @default(cuid())
+  id            String       @id @default(cuid())
   orgId         String
   org           Organization @relation(fields: [orgId], references: [id])
   name          String
   description   String?
-  unit          String  @default("C62") // UN/ECE Rec 20: C62=Stück, HUR=Stunde, KGM=kg, MTR=m …
+  articleNumber String? // frei vergebene Artikelnummer, Snapshot in Positionen (Phase 4b)
+  unit          String       @default("C62") // UN/ECE Rec 20: C62=Stück, HUR=Stunde, KGM=kg, MTR=m …
   netPriceCents Int
-  taxRate       Int     @default(19)    // 19 | 7 | 0
-  taxCategory   String  @default("S")   // UNTDID 5305: S | AE | K | G | E | Z
-  differential  Boolean @default(false) // §25a Differenzbesteuerung
-  isArchived    Boolean @default(false)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  taxRate       Int          @default(19) // 19 | 7 | 0
+  taxCategory   String       @default("S") // UNTDID 5305: S | AE | K | G | E | Z
+  differential  Boolean      @default(false) // §25a Differenzbesteuerung
+  isArchived    Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
 
   @@index([orgId])
+  @@index([orgId, articleNumber])
 }
 
 /// Nummernkreis — transaktionaler Zähler. Nummern werden NUR bei Festschreibung vergeben.
 model NumberRange {
-  id           String   @id @default(cuid())
+  id           String       @id @default(cuid())
   orgId        String
   org          Organization @relation(fields: [orgId], references: [id])
-  docType      String   // QUOTE | INVOICE | CREDIT_NOTE | DUNNING
-  prefix       String   @default("")
-  pattern      String   @default("{PREFIX}{YYYY}-{SEQ}") // Platzhalter {PREFIX}{YYYY}{MM}{SEQ}
-  seqPadding   Int      @default(4)
-  year         Int      @default(0) // 0 = jahresunabhängig
-  currentValue Int      @default(0)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  docType      String // QUOTE | INVOICE | CREDIT_NOTE | DUNNING
+  prefix       String       @default("")
+  pattern      String       @default("{PREFIX}{YYYY}-{SEQ}") // Platzhalter {PREFIX}{YYYY}{MM}{SEQ}
+  seqPadding   Int          @default(4)
+  year         Int          @default(0) // 0 = jahresunabhängig
+  currentValue Int          @default(0)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
   @@unique([orgId, docType, year])
   @@index([orgId])
@@ -122,44 +143,77 @@ model NumberRange {
 /// Geschäftsdokument ohne Beleg-Charakter (Angebot/Auftragsbestätigung/Proforma).
 /// KEIN GoBD-Beleg, frei editier-/löschbar. Tax-Belege sind ausschließlich Invoice.
 model Quote {
-  id                   String   @id @default(cuid())
-  orgId                String
-  org                  Organization @relation(fields: [orgId], references: [id])
-  customerId           String
-  customer             Customer @relation(fields: [customerId], references: [id])
-  kind                 String   @default("ANGEBOT") // ANGEBOT | AUFTRAGSBESTAETIGUNG | PROFORMA
-  number               String?
-  status               String   @default("DRAFT") // DRAFT | SENT | ACCEPTED | DECLINED | EXPIRED | CONVERTED
-  issueDate            DateTime @default(now())
-  validUntil           DateTime?
-  currency             String   @default("EUR")
-  taxScheme            String   @default("REGULAR")
-  notes                String?
-  netTotalCents        Int      @default(0)
-  taxTotalCents        Int      @default(0)
-  grossTotalCents      Int      @default(0)
-  convertedToInvoiceId String?
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  id                       String           @id @default(cuid())
+  orgId                    String
+  org                      Organization     @relation(fields: [orgId], references: [id])
+  customerId               String
+  customer                 Customer         @relation(fields: [customerId], references: [id])
+  kind                     String           @default("ANGEBOT") // ANGEBOT | AUFTRAGSBESTAETIGUNG | PROFORMA
+  number                   String?
+  status                   String           @default("DRAFT") // DRAFT | SENT | ACCEPTED | REJECTED | EXPIRED | CANCELLED
+  issueDate                DateTime         @default(now())
+  validUntil               DateTime?
+  currency                 String           @default("EUR")
+  taxScheme                String           @default("REGULAR")
+  subject                  String? // Betreffzeile
+  notes                    String?
+  internalNotes            String? // Nur intern sichtbar — nie in PDF oder Mails
+  headerText               String?
+  footerText               String?
+  deliveryTerms            String?
+  paymentTerms             String?
+  customerReference        String? // Kundenreferenz/Bestellnummer des Kunden
+  contactPersonId          String?
+  contactPerson            ContactPerson?   @relation(fields: [contactPersonId], references: [id], onDelete: SetNull)
+  billingAddressId         String?
+  billingAddress           CustomerAddress? @relation(fields: [billingAddressId], references: [id], onDelete: SetNull)
+  // Beleg-Rabatt/-Aufschlag (Phase 4a) — Promille 0..1000, Cents Festbetrag; proportional
+  // je Steuersatz-Bucket verteilt (src/lib/pricing/allocate.ts).
+  documentDiscountPermille Int              @default(0)
+  documentDiscountCents    Int              @default(0)
+  documentChargePermille   Int              @default(0)
+  documentChargeCents      Int              @default(0)
+  documentChargeReason     String?
+  sellerSnapshotJson       String? // Snapshot zum Erstellungszeitpunkt (Phase 0), siehe Invoice
+  buyerSnapshotJson        String?
+  snapshotSource           String? // CREATE | SENT | MIGRATION
+  snapshotAt               DateTime?
+  netTotalCents            Int              @default(0)
+  taxTotalCents            Int              @default(0)
+  grossTotalCents          Int              @default(0)
+  convertedToInvoiceId     String?
+  sentAt                   DateTime?
+  decidedAt                DateTime? // Zeitpunkt von ACCEPTED/DECLINED
+  decisionNote             String?
+  archivedAt               DateTime?
+  createdAt                DateTime         @default(now())
+  updatedAt                DateTime         @updatedAt
 
-  lines QuoteLine[]
+  lines      QuoteLine[]
+  shareLinks QuoteShareLink[]
 
   @@index([orgId])
   @@index([customerId])
+  @@index([contactPersonId])
+  @@index([billingAddressId])
 }
 
 model QuoteLine {
-  id                String @id @default(cuid())
+  id                String  @id @default(cuid())
   quoteId           String
-  quote             Quote  @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  quote             Quote   @relation(fields: [quoteId], references: [id], onDelete: Cascade)
   position          Int
+  lineType          String  @default("ITEM") // ITEM | HEADING | TEXT | SUBTOTAL (Phase 4b, §8: kein Menge-0-Workaround)
   description       String
-  quantityMilli     Int    // 1/1000 Einheit
-  unit              String @default("C62")
+  descriptionLong   String? // Rich-Text-Langbeschreibung (Markdown-Teilmenge, Phase 4b)
+  articleNumber     String? // Artikelnummer-Snapshot zum Erfassungszeitpunkt
+  quantityMilli     Int // 1/1000 Einheit
+  unit              String  @default("C62")
   unitNetPriceCents Int
   taxRate           Int
-  taxCategory       String @default("S")
-  discountPermille  Int    @default(0) // 0..1000 (= 0..100 %)
+  taxCategory       String  @default("S")
+  discountPermille  Int     @default(0) // 0..1000 (= 0..100 %)
+  discountCents     Int     @default(0) // zusaetzlicher Festbetragsrabatt (Cent)
   lineNetCents      Int
 
   @@index([quoteId])
@@ -167,48 +221,88 @@ model QuoteLine {
 
 /// Rechnung — GoBD-relevanter Beleg. Nach Festschreibung append-only.
 model Invoice {
-  id                    String   @id @default(cuid())
-  orgId                 String
-  org                   Organization @relation(fields: [orgId], references: [id])
-  customerId            String
-  customer              Customer @relation(fields: [customerId], references: [id])
-  number                String?  @unique // NULL bis Festschreibung
-  status                String   @default("DRAFT") // DRAFT | FINALIZED | SENT | PAID | PARTIALLY_PAID | CANCELLED
-  type                  String   @default("INVOICE") // INVOICE | CREDIT_NOTE | CORRECTION
-  taxScheme             String   @default("REGULAR") // REGULAR | KLEINUNTERNEHMER | DIFFERENZ | REVERSE_CHARGE | IG_LIEFERUNG | IG_LEISTUNG
-  currency              String   @default("EUR")
-  issueDate             DateTime @default(now())
-  deliveryDate          DateTime?
-  deliveryStart         DateTime?
-  deliveryEnd           DateTime?
-  dueDate               DateTime?
-  buyerReference        String?  // BT-10 / Leitweg-ID (B2G)
-  notes                 String?
-  paymentTerms          String?  // Skonto-/Zahlungsbedingungen (Freitext, §14 Abs.4 Nr.7)
-  netTotalCents         Int      @default(0)
-  taxTotalCents         Int      @default(0)
-  grossTotalCents       Int      @default(0)
-  paidAmountCents       Int      @default(0)
-  taxBreakdownJson      String   @default("[]") // [{taxCategory,taxRate,netCents,taxCents}]
-  consumerRetentionHint Boolean  @default(false) // §14 Abs.4 Nr.9 / §14b Abs.1 S.5
-  reversedByInvoiceId   String?  // Storno-Verknüpfung
-  correctsInvoiceId     String?  // Korrekturrechnung-Verknüpfung (§31 Abs.5 UStDV)
-  xmlFormat             String?  // XRECHNUNG | ZUGFERD
-  xmlHash               String?
-  pdfPath               String?
-  finalizedAt           DateTime?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  id                        String            @id @default(cuid())
+  orgId                     String
+  org                       Organization      @relation(fields: [orgId], references: [id])
+  customerId                String
+  customer                  Customer          @relation(fields: [customerId], references: [id])
+  number                    String?           @unique // NULL bis Festschreibung
+  status                    String            @default("DRAFT") // DRAFT | FINALIZED | SENT | PAID | PARTIALLY_PAID | CANCELLED
+  type                      String            @default("INVOICE") // INVOICE | CREDIT_NOTE | CORRECTION
+  taxScheme                 String            @default("REGULAR") // REGULAR | KLEINUNTERNEHMER | DIFFERENZ | REVERSE_CHARGE | IG_LIEFERUNG | IG_LEISTUNG
+  currency                  String            @default("EUR")
+  issueDate                 DateTime          @default(now())
+  deliveryDate              DateTime?
+  deliveryStart             DateTime?
+  deliveryEnd               DateTime?
+  dueDate                   DateTime?
+  buyerReference            String? // BT-10 / Leitweg-ID (B2G)
+  subject                   String? // Betreffzeile (Phase 4b, analog Quote.subject)
+  orderNumber               String? // Bestellnummer des Kunden, zusaetzlich zu buyerReference
+  internalReference         String? // interne Referenz/Kostenstelle, nur intern
+  contactPersonId           String?
+  contactPerson             ContactPerson?    @relation(fields: [contactPersonId], references: [id], onDelete: SetNull)
+  billingAddressId          String?
+  billingAddress            CustomerAddress?  @relation("InvoiceBillingAddress", fields: [billingAddressId], references: [id], onDelete: SetNull)
+  shippingAddressId         String?
+  shippingAddress           CustomerAddress?  @relation("InvoiceShippingAddress", fields: [shippingAddressId], references: [id], onDelete: SetNull)
+  notes                     String?
+  paymentTerms              String? // Skonto-/Zahlungsbedingungen (Freitext, §14 Abs.4 Nr.7)
+  internalNotes             String? // Nur intern sichtbar — nie in PDF, XRechnung, ZUGFeRD oder Mails
+  headerText                String?
+  footerText                String?
+  // Beleg-Rabatt/-Aufschlag (Phase 4a) — Promille 0..1000, Cents Festbetrag; proportional
+  // je Steuersatz-Bucket verteilt (src/lib/pricing/allocate.ts).
+  documentDiscountPermille  Int               @default(0)
+  documentDiscountCents     Int               @default(0)
+  documentChargePermille    Int               @default(0)
+  documentChargeCents       Int               @default(0)
+  documentChargeReason      String?
+  // Skonto-Konditionen (Phase 4a) — bis zu zwei Stufen (src/lib/pricing/skonto.ts).
+  skonto1Permille           Int?
+  skonto1Days               Int?
+  skonto2Permille           Int?
+  skonto2Days               Int?
+  paymentMethodId           String?
+  paymentMethod             PaymentMethod?    @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
+  // Snapshot der gewaehlten Zahlungsmethode zum Festschreibungszeitpunkt (Phase 4a),
+  // { code, name, invoiceText, untdidCode, bankIban, bankBic, bankName }. NULL, wenn
+  // keine Zahlungsmethode gewaehlt war.
+  paymentMethodSnapshotJson String?
+  // Snapshot der Parteien zum Festschreibungszeitpunkt (Phase 0). JSON-String, per Zod
+  // gelesen (sellerSnapshotSchema/buyerSnapshotSchema). NULL bei Entwuerfen.
+  sellerSnapshotJson        String?
+  buyerSnapshotJson         String?
+  snapshotSource            String? // FINALIZE | CREATE | MIGRATION
+  snapshotAt                DateTime?
+  netTotalCents             Int               @default(0)
+  taxTotalCents             Int               @default(0)
+  grossTotalCents           Int               @default(0)
+  paidAmountCents           Int               @default(0)
+  taxBreakdownJson          String            @default("[]") // [{taxCategory,taxRate,netCents,taxCents}]
+  consumerRetentionHint     Boolean           @default(false) // §14 Abs.4 Nr.9 / §14b Abs.1 S.5
+  reversedByInvoiceId       String? // Storno-Verknüpfung
+  correctsInvoiceId         String? // Korrekturrechnung-Verknüpfung (§31 Abs.5 UStDV)
+  recurringInvoiceId        String? // Herkunft: aus Abo/Dauerrechnung erzeugt
+  recurringInvoice          RecurringInvoice? @relation(fields: [recurringInvoiceId], references: [id])
+  xmlFormat                 String? // XRECHNUNG | ZUGFERD
+  xmlHash                   String?
+  pdfPath                   String?
+  finalizedAt               DateTime?
+  createdAt                 DateTime          @default(now())
+  updatedAt                 DateTime          @updatedAt
 
   lines    InvoiceLine[]
   payments Payment[]
   dunnings Dunning[]
-  recurringInvoiceId    String?
-  recurringInvoice      RecurringInvoice? @relation(fields: [recurringInvoiceId], references: [id])
 
   @@index([orgId])
   @@index([customerId])
   @@index([recurringInvoiceId])
+  @@index([paymentMethodId])
+  @@index([contactPersonId])
+  @@index([billingAddressId])
+  @@index([shippingAddressId])
 }
 
 model InvoiceLine {
@@ -216,50 +310,378 @@ model InvoiceLine {
   invoiceId         String
   invoice           Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   position          Int
+  lineType          String  @default("ITEM") // ITEM | HEADING | TEXT | SUBTOTAL (Phase 4b, §8: kein Menge-0-Workaround)
   productId         String? // nur Snapshot-Referenz, kein Live-Lookup
   description       String
+  descriptionLong   String? // Rich-Text-Langbeschreibung (Markdown-Teilmenge, Phase 4b)
+  articleNumber     String? // Artikelnummer-Snapshot zum Erfassungszeitpunkt
   quantityMilli     Int
   unit              String  @default("C62")
   unitNetPriceCents Int
   taxRate           Int
   taxCategory       String  @default("S")
   discountPermille  Int     @default(0)
+  discountCents     Int     @default(0) // zusaetzlicher Festbetragsrabatt (Cent)
   lineNetCents      Int
 
   @@index([invoiceId])
 }
 
 model Payment {
-  id          String   @id @default(cuid())
-  invoiceId   String
-  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  amountCents Int
-  paidAt      DateTime @default(now())
-  method      String   @default("TRANSFER") // TRANSFER | CASH | CARD | SEPA
-  reference   String?
-  isSkonto    Boolean  @default(false) // §17-Fall: keine Rechnungsberichtigung nötig
-  createdAt   DateTime @default(now())
+  id                 String   @id @default(cuid())
+  invoiceId          String
+  invoice            Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amountCents        Int
+  paidAt             DateTime @default(now())
+  method             String   @default("TRANSFER") // TRANSFER | CASH | CARD | SEPA
+  reference          String?
+  isSkonto           Boolean  @default(false) // §17-Fall: keine Rechnungsberichtigung nötig
+  // Bei isSkonto=true: die Zahlung, deren Skontoabzug hierdurch verbucht wird.
+  skontoForPaymentId String?
+  createdAt          DateTime @default(now())
 
   @@index([invoiceId])
 }
 
 model Dunning {
-  id                       String   @id @default(cuid())
+  id                       String    @id @default(cuid())
   invoiceId                String
-  invoice                  Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoice                  Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   number                   String?
-  level                    Int      // 0 = Zahlungserinnerung, 1, 2
-  sentAt                   DateTime @default(now())
+  level                    Int // 0 = Zahlungserinnerung, 1, 2
+  sentAt                   DateTime  @default(now())
   dueDate                  DateTime?
-  baseInterestRatePermille Int?     // Basiszinssatz-Snapshot (‰ zum Verzugsstichtag)
-  interestRatePoints       Int?     // 5 (B2C) oder 9 (B2B) Prozentpunkte über Basiszins
-  interestAmountCents      Int      @default(0)
-  lateFeeCents             Int      @default(0) // nur konkrete Kosten, KEINE Pauschale
-  flatFee40Cents           Int      @default(0) // §288 Abs.5, nur B2B
+  baseInterestRatePermille Int? // Basiszinssatz-Snapshot (‰ zum Verzugsstichtag)
+  interestRatePoints       Int? // 5 (B2C) oder 9 (B2B) Prozentpunkte über Basiszins
+  interestAmountCents      Int       @default(0)
+  lateFeeCents             Int       @default(0) // nur konkrete Kosten, KEINE Pauschale
+  flatFee40Cents           Int       @default(0) // §288 Abs.5, nur B2B
   pdfPath                  String?
-  createdAt                DateTime @default(now())
+  createdAt                DateTime  @default(now())
+
+  stageId String?
+  stage   DunningStage? @relation(fields: [stageId], references: [id])
 
   @@index([invoiceId])
+}
+
+/// Wiederkehrende Rechnung / Abo — Vorlage, aus der nach Plan reguläre Rechnungs-
+/// ENTWÜRFE erzeugt werden. Selbst KEIN Beleg (frei editierbar). Die erzeugten
+/// Invoices durchlaufen Festschreibung/Nummernkreis/Hash-Chain wie jede Rechnung.
+model RecurringInvoice {
+  id               String       @id @default(cuid())
+  orgId            String
+  org              Organization @relation(fields: [orgId], references: [id])
+  customerId       String
+  customer         Customer     @relation(fields: [customerId], references: [id])
+  title            String // interne Bezeichnung, z. B. "Wartungsvertrag Mustermann"
+  status           String       @default("ACTIVE") // ACTIVE | PAUSED | ENDED
+  interval         String       @default("MONTHLY") // WEEKLY | MONTHLY | QUARTERLY | YEARLY
+  intervalCount    Int          @default(1) // alle N Intervalle (z. B. 2 = alle 2 Monate)
+  anchorDay        Int? // fixer Tag im Monat (1..28) für MONTHLY/QUARTERLY/YEARLY
+  startDate        DateTime
+  nextRunDate      DateTime // Stichtag der nächsten Erzeugung
+  endDate          DateTime?
+  taxScheme        String       @default("REGULAR")
+  currency         String       @default("EUR")
+  paymentTermsDays Int          @default(14)
+  notes            String?
+  autoFinalize     Boolean      @default(false) // true = erzeugte Rechnung sofort festschreiben
+  lastRunAt        DateTime?
+  issuedCount      Int          @default(0)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  lines    RecurringInvoiceLine[]
+  invoices Invoice[]
+
+  @@index([orgId])
+  @@index([customerId])
+  @@index([status, nextRunDate])
+}
+
+model RecurringInvoiceLine {
+  id                 String           @id @default(cuid())
+  recurringInvoiceId String
+  recurringInvoice   RecurringInvoice @relation(fields: [recurringInvoiceId], references: [id], onDelete: Cascade)
+  position           Int
+  description        String
+  quantityMilli      Int
+  unit               String           @default("C62")
+  unitNetPriceCents  Int
+  taxRate            Int
+  taxCategory        String           @default("S")
+  discountPermille   Int              @default(0)
+
+  @@index([recurringInvoiceId])
+}
+
+/// Generische Verknuepfung zwischen Belegen (Phase 1). Polymorph ueber Typ+ID, daher ohne
+/// Fremdschluessel; Existenz prueft die Domain (linkDocuments). Die Altfelder
+/// (convertedToInvoiceId, correctsInvoiceId, reversedByInvoiceId, recurringInvoiceId)
+/// bleiben und werden parallel gepflegt.
+model DocumentRelation {
+  id           String       @id @default(cuid())
+  orgId        String
+  org          Organization @relation(fields: [orgId], references: [id])
+  fromType     String // QUOTE | INVOICE | RECURRING | DELIVERY_NOTE | DUNNING
+  fromId       String
+  toType       String
+  toId         String
+  relationType String // CONVERTED_TO | CORRECTS | REVERSES | GENERATED_BY | PARTIAL_OF | DOWNPAYMENT_OF | FINAL_FOR | DELIVERED_BY
+  createdAt    DateTime     @default(now())
+
+  @@unique([fromType, fromId, toType, toId, relationType])
+  @@index([orgId])
+  @@index([fromType, fromId])
+  @@index([toType, toId])
+}
+
+/// Lieferschein — mengenfuehrend, kein GoBD-Beleg, belegt den Leistungszeitpunkt.
+model DeliveryNote {
+  id                 String       @id @default(cuid())
+  orgId              String
+  org                Organization @relation(fields: [orgId], references: [id])
+  customerId         String
+  customer           Customer     @relation(fields: [customerId], references: [id])
+  number             String?
+  status             String       @default("DRAFT") // DRAFT | CREATED | SENT | DELIVERED | CANCELLED
+  issueDate          DateTime     @default(now())
+  deliveryDate       DateTime?
+  shippingDate       DateTime?
+  showPrices         Boolean      @default(false)
+  showTax            Boolean      @default(false)
+  showArticleNumber  Boolean      @default(true)
+  showDescription    Boolean      @default(true)
+  notes              String?
+  internalNotes      String?
+  headerText         String?
+  footerText         String?
+  sourceType         String? // QUOTE | INVOICE — Hauptquelle des Belegs
+  sourceId           String?
+  sellerSnapshotJson String?
+  buyerSnapshotJson  String?
+  snapshotSource     String?
+  snapshotAt         DateTime?
+  sentAt             DateTime?
+  deliveredAt        DateTime?
+  archivedAt         DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  lines DeliveryNoteLine[]
+
+  @@index([orgId])
+  @@index([customerId])
+}
+
+model DeliveryNoteLine {
+  id                String       @id @default(cuid())
+  deliveryNoteId    String
+  deliveryNote      DeliveryNote @relation(fields: [deliveryNoteId], references: [id], onDelete: Cascade)
+  position          Int
+  sourceType        String? // QUOTE | INVOICE (Quellposition fuer Teil-Lieferungen)
+  sourceId          String?
+  sourceLineId      String? // Positions-ID der Quellzeile
+  description       String
+  articleNumber     String?
+  quantityMilli     Int
+  unit              String       @default("C62")
+  unitNetPriceCents Int?
+  taxRate           Int?
+
+  @@index([deliveryNoteId])
+}
+
+/// Textvorlagen fuer Belege (Kopf-/Fusstext, Bedingungen). Stammdaten — der gerenderte
+/// Text wird beim Erzeugen des Belegs als Snapshot in den Beleg geschrieben.
+model TextTemplate {
+  id        String       @id @default(cuid())
+  orgId     String
+  org       Organization @relation(fields: [orgId], references: [id])
+  name      String
+  docType   String
+  position  String // HEAD | FOOT | TERMS_DELIVERY | TERMS_PAYMENT
+  body      String
+  isDefault Boolean      @default(false)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@unique([orgId, docType, position, name])
+  @@index([orgId, docType])
+}
+
+model EmailTemplate {
+  id        String       @id @default(cuid())
+  orgId     String
+  org       Organization @relation(fields: [orgId], references: [id])
+  name      String
+  docType   String
+  subject   String
+  body      String
+  signature String?
+  isDefault Boolean      @default(false)
+  isSystem  Boolean      @default(false)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  dunningStages DunningStage[]
+
+  @@unique([orgId, docType, name])
+  @@index([orgId, docType])
+}
+
+/// Versandprotokoll. Text vollstaendig, Anhaenge nur als SHA-256 (Betreiberentscheidung).
+model EmailLog {
+  id              String       @id @default(cuid())
+  orgId           String
+  org             Organization @relation(fields: [orgId], references: [id])
+  docType         String
+  docId           String
+  templateId      String?
+  toJson          String       @default("[]")
+  ccJson          String       @default("[]")
+  bccJson         String       @default("[]")
+  fromEmail       String       @default("")
+  replyTo         String?
+  subject         String
+  bodySnapshot    String
+  attachmentsJson String       @default("[]") // [{name, sha256, bytes}]
+  status          String       @default("QUEUED") // QUEUED | SENT | DELIVERED | BOUNCED | FAILED
+  providerId      String?
+  error           String?
+  warningsJson    String       @default("[]")
+  resendOfId      String?
+  sentByUserId    String?
+  sentAt          DateTime?
+  createdAt       DateTime     @default(now())
+
+  @@index([orgId])
+  @@index([docType, docId])
+}
+
+/// SMTP-Zugang je Organisation. passwordEnc: AES-256-GCM, Schluessel aus AUTH_SECRET (src/lib/crypto/secrets.ts).
+model MailSettings {
+  id          String       @id @default(cuid())
+  orgId       String       @unique
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  host        String
+  port        Int
+  security    String // "STARTTLS" | "TLS" | "NONE"
+  username    String?
+  passwordEnc String?
+  fromName    String
+  fromEmail   String
+  replyTo     String?
+  defaultCc   String       @default("")
+  defaultBcc  String       @default("")
+  copyToSelf  Boolean      @default(false)
+  lastTestAt  DateTime?
+  lastTestOk  Boolean?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+/// Zusatzadressen eines Kunden. Die Hauptadresse bleibt in Customer.
+model CustomerAddress {
+  id           String       @id @default(cuid())
+  orgId        String
+  org          Organization @relation(fields: [orgId], references: [id])
+  customerId   String
+  customer     Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  type         String // BILLING | SHIPPING | OTHER
+  label        String?
+  addressLine1 String
+  addressLine2 String?
+  postalCode   String
+  city         String
+  countryCode  String       @default("DE")
+  isDefault    Boolean      @default(false)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  quotes           Quote[]
+  invoicesBilling  Invoice[] @relation("InvoiceBillingAddress")
+  invoicesShipping Invoice[] @relation("InvoiceShippingAddress")
+
+  @@index([orgId])
+  @@index([customerId])
+}
+
+model ContactPerson {
+  id         String       @id @default(cuid())
+  orgId      String
+  org        Organization @relation(fields: [orgId], references: [id])
+  customerId String
+  customer   Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  firstName  String
+  lastName   String
+  role       String?
+  phone      String?
+  mobile     String?
+  email      String?
+  isDefault  Boolean      @default(false)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  quotes   Quote[]
+  invoices Invoice[]
+
+  @@index([orgId])
+  @@index([customerId])
+}
+
+/// Zahlungsmethoden als Stammdaten. Systemeintraege (isSystem) entstehen je Organisation.
+model PaymentMethod {
+  id               String       @id @default(cuid())
+  orgId            String
+  org              Organization @relation(fields: [orgId], references: [id])
+  code             String
+  name             String
+  description      String?
+  paymentTermsDays Int?
+  invoiceText      String?
+  bankAccountRef   String?
+  bankIban         String?
+  bankBic          String?
+  bankName         String?
+  untdidCode       String       @default("ZZZ") // UNTDID 4461 (BT-81)
+  isSystem         Boolean      @default(false)
+  isActive         Boolean      @default(true)
+  sortOrder        Int          @default(0)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  customers Customer[]
+  invoices  Invoice[]
+
+  @@unique([orgId, code])
+  @@index([orgId])
+}
+
+/// Konfigurierbare Mahnstufen. Dunning.level bleibt als historischer Wert bestehen.
+model DunningStage {
+  id                 String         @id @default(cuid())
+  orgId              String
+  org                Organization   @relation(fields: [orgId], references: [id])
+  order              Int
+  name               String
+  daysAfterDue       Int
+  newDueDays         Int            @default(14)
+  feeCents           Int            @default(0)
+  calculateInterest  Boolean
+  includeB2BFlatFee  Boolean
+  emailTemplateId    String?
+  emailTemplate      EmailTemplate? @relation(fields: [emailTemplateId], references: [id])
+  documentTemplateId String?
+  enabled            Boolean        @default(true)
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  dunnings Dunning[]
+
+  @@unique([orgId, order])
+  @@index([orgId])
 }
 
 /// Anmeldekonto (Self-Hosting). MVP: ein Admin-Konto, beim ersten Start angelegt.
@@ -272,16 +694,16 @@ model User {
 
 /// Append-only Änderungsprotokoll (GoBD-Kern). Hash-Chain macht Manipulation erkennbar.
 model ChangeLog {
-  id       Int      @id @default(autoincrement()) // streng monotone Einfüge-Reihenfolge für die Hash-Chain
+  id       Int          @id @default(autoincrement()) // streng monotone Einfüge-Reihenfolge für die Hash-Chain
   orgId    String
   org      Organization @relation(fields: [orgId], references: [id])
-  entity   String   // INVOICE | PAYMENT | CUSTOMER | …
+  entity   String // INVOICE | PAYMENT | CUSTOMER | …
   entityId String
-  action   String   // CREATE | UPDATE | FINALIZE | CANCEL | DELETE_PRE_FINALIZE
-  actor    String   @default("system")
-  at       DateTime @default(now())
-  diffJson String   @default("{}")
-  prevHash String   @default("")
+  action   String // CREATE | UPDATE | FINALIZE | CANCEL | DELETE_PRE_FINALIZE
+  actor    String       @default("system")
+  at       DateTime     @default(now())
+  diffJson String       @default("{}")
+  prevHash String       @default("")
   hash     String
 
   // Verhindert ein stilles Forken der Hash-Chain bei nebenläufigen Schreibern:
@@ -291,50 +713,60 @@ model ChangeLog {
   @@index([entity, entityId])
 }
 
-model RecurringInvoice {
-  id               String   @id @default(cuid())
-  orgId            String
-  org              Organization @relation(fields: [orgId], references: [id])
-  customerId       String
-  customer         Customer @relation(fields: [customerId], references: [id])
-  title            String
-  status           String   @default("ACTIVE")
-  interval         String   @default("MONTHLY")
-  intervalCount    Int      @default(1)
-  anchorDay        Int?
-  startDate        DateTime
-  nextRunDate      DateTime
-  endDate          DateTime?
-  taxScheme        String   @default("REGULAR")
-  currency         String   @default("EUR")
-  paymentTermsDays Int      @default(14)
-  notes            String?
-  autoFinalize     Boolean  @default(false)
-  lastRunAt        DateTime?
-  issuedCount      Int      @default(0)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+/// Angebotsannahme-Link (Phase 3b). orgId wie EmailLog als reines Feld ohne Relation
+/// (Tenancy-Filter genuegt; kein Cascade-Delete ueber Organization noetig).
+model QuoteShareLink {
+  id             String    @id @default(cuid())
+  orgId          String
+  quoteId        String
+  quote          Quote     @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  tokenHash      String    @unique
+  tokenEnc       String? // Task-1-Adjudikation: AES-256-GCM-verschluesselt (AUTH_SECRET), fuer Betreiber-Wiederabruf
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  createdBy      String
+  createdAt      DateTime  @default(now())
+  viewCount      Int       @default(0)
+  lastViewedAt   DateTime?
+  decidedAt      DateTime?
+  decision       String? // ACCEPTED | REJECTED
+  deciderName    String?
+  deciderEmail   String?
+  deciderComment String?
+  deciderIp      String?
 
-  lines    RecurringInvoiceLine[]
-  invoices Invoice[]
-
-  @@index([orgId])
-  @@index([customerId])
-  @@index([status, nextRunDate])
+  @@index([orgId, quoteId])
 }
 
-model RecurringInvoiceLine {
-  id                 String @id @default(cuid())
-  recurringInvoiceId String
-  recurringInvoice   RecurringInvoice @relation(fields: [recurringInvoiceId], references: [id], onDelete: Cascade)
-  position           Int
-  description        String
-  quantityMilli      Int
-  unit               String @default("C62")
-  unitNetPriceCents  Int
-  taxRate            Int
-  taxCategory        String @default("S")
-  discountPermille   Int    @default(0)
+/// Org-weite Einstellungen fuer Angebotsannahme und Dokumentverhalten (Phase 3b).
+model DocumentSettings {
+  id            String       @id @default(cuid())
+  orgId         String       @unique
+  org           Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  onQuoteAccept String       @default("NONE") // NONE | ORDER_CONFIRMATION | INVOICE
+  shareLinkDays Int          @default(30)
+  storeAcceptIp Boolean      @default(false)
+  updatedAt     DateTime     @updatedAt
+}
 
-  @@index([recurringInvoiceId])
+/// Beleganhang (Phase 4b) — Datei ausserhalb des Web-Roots (§38), Zugriff nur org-geprueft.
+/// Whitelist + Magic-Bytes-Pruefung erzwingt src/lib/attachments (nicht dieses Modell).
+/// Kein GoBD-Beleg: loeschbar, Loeschung wird ueber ActivityLog protokolliert (Audit K5),
+/// nicht ueber die ChangeLog-Hash-Kette.
+model DocumentAttachment {
+  id          String       @id @default(cuid())
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id])
+  docType     String // QUOTE | INVOICE | DELIVERY_NOTE | DUNNING | RECURRING
+  docId       String
+  filename    String
+  mime        String
+  sizeBytes   Int
+  sha256      String
+  storagePath String
+  uploadedBy  String
+  createdAt   DateTime     @default(now())
+
+  @@unique([orgId, sha256, docType, docId])
+  @@index([orgId, docType, docId])
 }

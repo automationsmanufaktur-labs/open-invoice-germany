@@ -83,6 +83,19 @@ describe("XRechnung / EN 16931", () => {
     expect(validateXRechnung(ku, xml).errors).toEqual([]);
   });
 
+  it("erkennt einen Beleg nur mit HEADING-Zeile als Verletzung von BR-16 (keine ITEM-Position)", () => {
+    // Commit 0 (Task-4-Review): BR-16 muss die ITEM-Zeilen zaehlen, nicht data.lines.length —
+    // eine reine Gliederungszeile (HEADING, §8) darf nicht als "Rechnungsposition" durchgehen.
+    const headingOnly: EInvoiceData = {
+      ...data,
+      lines: [{ id: "1", description: "Ueberschrift", quantityMilli: 0, unit: "C62", unitNetPriceCents: 0, lineNetCents: 0, taxRate: 0, taxCategory: "S", lineType: "HEADING" }],
+    };
+    const xml = buildXRechnungUBL(headingOnly);
+    const result = validateXRechnung(headingOnly, xml);
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/BR-16/);
+  });
+
   it("erkennt Verkäufer ohne jegliche Steuer-ID (BR-CO-26)", () => {
     const bad: EInvoiceData = { ...data, seller: { ...data.seller, vatId: null, taxNumber: null } };
     const result = validateXRechnung(bad, buildXRechnungUBL(bad));

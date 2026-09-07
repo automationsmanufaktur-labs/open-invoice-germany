@@ -15,6 +15,8 @@ import { dbInternal } from "@/lib/db";
 import { computeTaxBreakdown } from "@/lib/tax";
 import { defaultPrefix, formatDocumentNumber } from "@/domain/numbering";
 import { appendChangeLog } from "@/domain/audit";
+import { buildSellerSnapshot, buildBuyerSnapshot } from "@/domain/snapshot";
+import type { SnapshotSource } from "@/schemas";
 import { validateMandatoryFields } from "./mandatory";
 
 export class FinalizeError extends Error {
@@ -29,6 +31,14 @@ export interface FinalizeOptions {
   now?: Date;
   /** Kleinbetragsrechnung (§ 33 UStDV, ≤ 250 € brutto) — reduzierte Pflichtangaben. */
   isSmallAmount?: boolean;
+  /**
+   * Storno/Teilgutschrift: Snapshot des Originalbelegs unveraendert uebernehmen statt
+   * aus dem aktuellen Stamm neu zu bauen. Ein Korrekturbeleg (Storno, Teilgutschrift)
+   * berichtigt genau das Original — er muss denselben Empfaenger/Verkaeufer nennen wie
+   * dieses, auch wenn sich die Stammdaten zwischenzeitlich geaendert haben. Nur wirksam,
+   * wenn BEIDE Werte gesetzt sind; sonst greift der bisherige Live-Pfad (Herkunft FINALIZE).
+   */
+  inheritSnapshotFrom?: { sellerSnapshotJson: string | null; buyerSnapshotJson: string | null };
 }
 
 export async function finalizeWithinTx(
@@ -41,7 +51,7 @@ export async function finalizeWithinTx(
 
   const invoice = await tx.invoice.findUnique({
     where: { id: invoiceId },
-    include: { lines: { orderBy: { position: "asc" } }, org: true, customer: true },
+    include: { lines: { orderBy: { position: "asc" } }, org: true, customer: true, paymentMethod: true },
   });
   if (!invoice) throw new FinalizeError("Rechnung nicht gefunden.");
   if (invoice.status !== "DRAFT")
@@ -62,6 +72,7 @@ export async function finalizeWithinTx(
       quantityMilli: l.quantityMilli,
       taxRate: l.taxRate,
       taxCategory: l.taxCategory,
+      lineType: l.lineType,
     })),
     org: invoice.org,
     customer: invoice.customer,
@@ -70,10 +81,44 @@ export async function finalizeWithinTx(
     throw new FinalizeError("Pflichtangaben unvollständig:\n- " + problems.join("\n- "));
   }
 
-  // 2) Summen-Snapshot
+  // 2) Summen-Snapshot. Nicht-ITEM-Zeilen (HEADING/TEXT/SUBTOTAL) gehen nie in Summen/
+  // Steuerberechnung ein (§8) — sie tragen zwar bereits lineNetCents=0/taxRate=0
+  // (normalizeLines), koennten aber ohne Filter eine zusaetzliche 0-Betrags-Steuergruppe
+  // fuer ihre (unveraenderte) taxCategory erzeugen (Fix-Welle, K1).
+  const itemLinesForTotals = invoice.lines.filter((l) => l.lineType === "ITEM");
   const totals = computeTaxBreakdown(
-    invoice.lines.map((l) => ({ lineNetCents: l.lineNetCents, taxRate: l.taxRate, taxCategory: l.taxCategory })),
+    itemLinesForTotals.map((l) => ({ lineNetCents: l.lineNetCents, taxRate: l.taxRate, taxCategory: l.taxCategory })),
+    {
+      discountPermille: invoice.documentDiscountPermille,
+      discountCents: invoice.documentDiscountCents,
+      chargePermille: invoice.documentChargePermille,
+      chargeCents: invoice.documentChargeCents,
+    },
   );
+
+  // Snapshot der Zahlungsmethode (Phase 4a): ab jetzt bleibt der zum Festschreibungs-
+  // zeitpunkt gewaehlte Zahlungsweg unveraendert, auch wenn sich die Stammdaten der
+  // Zahlungsmethode spaeter aendern (gleiches Prinzip wie Seller-/Buyer-Snapshot).
+  const paymentMethodSnapshotJson = invoice.paymentMethod
+    ? JSON.stringify({
+        code: invoice.paymentMethod.code,
+        name: invoice.paymentMethod.name,
+        invoiceText: invoice.paymentMethod.invoiceText,
+        untdidCode: invoice.paymentMethod.untdidCode,
+        bankIban: invoice.paymentMethod.bankIban,
+        bankBic: invoice.paymentMethod.bankBic,
+        bankName: invoice.paymentMethod.bankName,
+      })
+    : null;
+
+  // Parteien-Snapshot (Phase 0): ab jetzt rendern PDF/XML aus diesem Stand.
+  // Storno/Teilgutschrift erben den Snapshot des Originals (siehe FinalizeOptions.inheritSnapshotFrom),
+  // damit der Korrekturbeleg denselben Empfaenger/Verkaeufer nennt wie das Original.
+  const inherited = opts.inheritSnapshotFrom;
+  const canInherit = !!inherited?.sellerSnapshotJson && !!inherited?.buyerSnapshotJson;
+  const sellerSnapshotJson = canInherit ? inherited!.sellerSnapshotJson : JSON.stringify(buildSellerSnapshot(invoice.org));
+  const buyerSnapshotJson = canInherit ? inherited!.buyerSnapshotJson : JSON.stringify(buildBuyerSnapshot(invoice.customer));
+  const snapshotSource: SnapshotSource = canInherit ? "INHERITED" : "FINALIZE";
 
   // 3) Atomarer Status-Claim: nur wenn noch DRAFT. Verhindert unter Nebenläufigkeit
   //    (Postgres READ COMMITTED) doppelte Festschreibung + doppelten Nummern-Verbrauch.
@@ -87,6 +132,11 @@ export async function finalizeWithinTx(
       taxTotalCents: totals.taxTotalCents,
       grossTotalCents: totals.grossTotalCents,
       taxBreakdownJson: JSON.stringify(totals.breakdown),
+      sellerSnapshotJson,
+      buyerSnapshotJson,
+      snapshotSource,
+      snapshotAt: now,
+      paymentMethodSnapshotJson,
     },
   });
   if (claim.count === 0) {
@@ -107,6 +157,7 @@ export async function finalizeWithinTx(
     padding: range.seqPadding,
     year,
     month: now.getMonth() + 1,
+    day: now.getDate(),
   });
   await tx.invoice.update({ where: { id: invoiceId }, data: { number } });
 
@@ -118,7 +169,7 @@ export async function finalizeWithinTx(
     action: "FINALIZE",
     actor,
     at: now,
-    diff: { number, status: "FINALIZED", grossTotalCents: totals.grossTotalCents },
+    diff: { number, status: "FINALIZED", grossTotalCents: totals.grossTotalCents, snapshotSource },
   });
 
   const result = await tx.invoice.findUnique({

@@ -1,8 +1,21 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { prisma } from "@/lib/db";
-import { formatCents, formatQuantity } from "@/lib/money";
-import { ConvertButton } from "@/components/ConvertButton";
+import { getActiveOrg } from "@/lib/org";
+import { dbInternal } from "@/lib/db";
+import { formatCents } from "@/lib/money";
+import { effectiveQuoteStatus } from "@/domain/document/status";
+import { billingStateFor } from "@/domain/document/billing-state";
+import { StatusBadge, BillingStateBadge } from "@/components/StatusBadge";
+import { DocumentActions } from "@/components/DocumentActions";
+import { ConvertMenu } from "@/components/ConvertMenu";
+import { DocumentChain } from "@/components/DocumentChain";
+import { SendEmailDialog } from "@/components/SendEmailDialog";
+import { EmailHistory } from "@/components/EmailHistory";
+import { ShareLinkPanel } from "@/components/ShareLinkPanel";
+import { AttachmentPanel } from "@/components/AttachmentPanel";
+import { listAttachments } from "@/domain/attachment/manage";
+import { LineItemsTable } from "@/components/LineItemsTable";
+import type { EmailDocType } from "@/schemas/email";
 
 export const dynamic = "force-dynamic";
 
@@ -12,24 +25,47 @@ const KIND_TITLE: Record<string, string> = {
   PROFORMA: "Proforma-Rechnung",
 };
 
+// Client-seitige Kopie der Statuslisten aus src/domain/document/convert.ts (dort nicht
+// importierbar, weil die Datei dbInternal fuer den Schreibpfad laedt) — steuert nur, welche
+// ConvertMenu-Optionen angeboten werden; die eigentliche Pruefung bleibt serverseitig
+// (ConvertError/409 bei Verstoss, W2 Fix-Runde 2).
+const ANGEBOT_TO_AB_STATUSES = new Set(["DRAFT", "SENT", "ACCEPTED", "EXPIRED"]);
+const ANGEBOT_TO_INVOICE_STATUSES = new Set(["DRAFT", "SENT", "ACCEPTED", "EXPIRED"]);
+const AB_TO_INVOICE_STATUSES = new Set(["DRAFT", "SENT"]);
+const QUOTE_TO_DELIVERY_NOTE_STATUSES = new Set(["DRAFT", "SENT", "ACCEPTED", "EXPIRED"]);
+
 export default async function DokumentDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const q = await prisma.quote.findUnique({
-    where: { id },
-    include: { lines: { orderBy: { position: "asc" } }, customer: true },
+  const org = await getActiveOrg();
+  const q = await dbInternal.quote.findFirst({
+    where: { id, orgId: org.id },
+    include: { lines: { orderBy: { position: "asc" } }, customer: true, contactPerson: true, billingAddress: true },
   });
   if (!q) notFound();
+
+  const status = effectiveQuoteStatus({ status: q.status, validUntil: q.validUntil });
+  const billing = q.kind !== "PROFORMA" ? await billingStateFor(org.id, "QUOTE", q.id) : null;
+  const archived = q.archivedAt !== null;
+  const attachments = await listAttachments(org.id, "QUOTE", q.id);
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <Link href="/dokumente" className="text-sm text-slate-500 hover:text-slate-800">
             ← Dokumente
           </Link>
           <h1 className="text-2xl font-bold tracking-tight">
-            {KIND_TITLE[q.kind] ?? "Dokument"} {q.number}
+            {KIND_TITLE[q.kind] ?? "Dokument"} {q.number ?? "(Entwurf)"}
           </h1>
+          <StatusBadge status={status} />
+          {billing && <BillingStateBadge state={billing.state} />}
+          {archived && <span className="inline-block rounded bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-600">Archiviert</span>}
+          {q.snapshotSource === "MIGRATION" && (
+            <span className="inline-block rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+              Adressstand per Migration eingefroren
+            </span>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <a
@@ -39,15 +75,30 @@ export default async function DokumentDetail({ params }: { params: Promise<{ id:
           >
             PDF
           </a>
-          {q.convertedToInvoiceId ? (
+          <SendEmailDialog docType={q.kind as EmailDocType} docId={q.id} />
+          {q.convertedToInvoiceId && (
             <Link href={`/rechnungen/${q.convertedToInvoiceId}`} className="text-sm font-medium text-indigo-600 hover:underline">
               → zur Rechnung
             </Link>
-          ) : (
-            <ConvertButton documentId={q.id} />
           )}
+          {/* G8 (Fix-Runde 2): ConvertMenu bleibt auch nach Umwandlung in eine Rechnung
+              sichtbar — ein Lieferschein (Teilmengen) kann weiterhin erzeugt werden, nur
+              die Rechnungs-/AB-Optionen ergeben nach der Umwandlung keinen Sinn mehr.
+              W2: jede Option nur bei einem fuer die Konvertierung zulaessigen Status. */}
+          <ConvertMenu
+            sourceType="QUOTE"
+            sourceId={q.id}
+            showToOrderConfirmation={q.kind === "ANGEBOT" && !q.convertedToInvoiceId && ANGEBOT_TO_AB_STATUSES.has(status)}
+            showToInvoice={
+              !q.convertedToInvoiceId &&
+              ((q.kind === "ANGEBOT" && ANGEBOT_TO_INVOICE_STATUSES.has(status)) || (q.kind === "AUFTRAGSBESTAETIGUNG" && AB_TO_INVOICE_STATUSES.has(status)))
+            }
+            showToDeliveryNote={QUOTE_TO_DELIVERY_NOTE_STATUSES.has(status)}
+          />
         </div>
       </div>
+
+      <DocumentActions type="QUOTE" id={q.id} status={status} archived={archived} editHref={`/dokumente/${q.id}/bearbeiten`} />
 
       {q.kind === "PROFORMA" && (
         <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
@@ -55,41 +106,65 @@ export default async function DokumentDetail({ params }: { params: Promise<{ id:
         </div>
       )}
 
-      <div className="rounded-lg border border-slate-200 bg-white p-5 text-sm">
-        <h2 className="mb-2 font-semibold text-slate-900">Empfänger</h2>
-        <p className="text-slate-700">{q.customer.name}</p>
-        <p className="text-slate-600">{q.customer.addressLine1}</p>
-        <p className="text-slate-600">
-          {q.customer.postalCode} {q.customer.city}
-        </p>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="rounded-lg border border-slate-200 bg-white p-5 text-sm">
+          <h2 className="mb-2 font-semibold text-slate-900">Empfänger</h2>
+          <p className="text-slate-700">{q.customer.name}</p>
+          {q.contactPerson && (
+            <p className="text-slate-600">
+              {q.contactPerson.firstName} {q.contactPerson.lastName}
+            </p>
+          )}
+          {q.billingAddress ? (
+            <>
+              <p className="text-slate-600">{q.billingAddress.addressLine1}</p>
+              <p className="text-slate-600">
+                {q.billingAddress.postalCode} {q.billingAddress.city}
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-slate-600">{q.customer.addressLine1}</p>
+              <p className="text-slate-600">
+                {q.customer.postalCode} {q.customer.city}
+              </p>
+            </>
+          )}
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-5 text-sm">
+          <h2 className="mb-2 font-semibold text-slate-900">Eckdaten</h2>
+          <dl className="grid grid-cols-2 gap-y-1 text-slate-600">
+            {q.subject && (
+              <>
+                <dt>Betreff</dt>
+                <dd className="text-right">{q.subject}</dd>
+              </>
+            )}
+            {q.customerReference && (
+              <>
+                <dt>Kundenreferenz</dt>
+                <dd className="text-right">{q.customerReference}</dd>
+              </>
+            )}
+            {q.deliveryTerms && (
+              <>
+                <dt>Lieferbedingungen</dt>
+                <dd className="text-right">{q.deliveryTerms}</dd>
+              </>
+            )}
+            {q.paymentTerms && (
+              <>
+                <dt>Zahlungsbedingungen</dt>
+                <dd className="text-right">{q.paymentTerms}</dd>
+              </>
+            )}
+          </dl>
+        </div>
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
-            <tr>
-              <th className="px-4 py-2">Beschreibung</th>
-              <th className="px-4 py-2 text-right">Menge</th>
-              <th className="px-4 py-2 text-right">Einzel</th>
-              <th className="px-4 py-2 text-right">USt</th>
-              <th className="px-4 py-2 text-right">Netto</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {q.lines.map((l) => (
-              <tr key={l.id}>
-                <td className="px-4 py-2 text-slate-700">{l.description}</td>
-                <td className="tabular px-4 py-2 text-right">
-                  {formatQuantity(l.quantityMilli)} {l.unit}
-                </td>
-                <td className="tabular px-4 py-2 text-right">{formatCents(l.unitNetPriceCents, q.currency)}</td>
-                <td className="tabular px-4 py-2 text-right">{l.taxRate}%</td>
-                <td className="tabular px-4 py-2 text-right">{formatCents(l.lineNetCents, q.currency)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {q.headerText && <p className="whitespace-pre-line text-sm text-slate-700">{q.headerText}</p>}
+
+      <LineItemsTable lines={q.lines} currency={q.currency} />
 
       <div className="ml-auto max-w-xs space-y-1 text-sm">
         <div className="flex justify-between">
@@ -106,7 +181,24 @@ export default async function DokumentDetail({ params }: { params: Promise<{ id:
         </div>
       </div>
 
+      {q.footerText && <p className="whitespace-pre-line text-sm text-slate-700">{q.footerText}</p>}
       {q.notes && <p className="text-sm text-slate-600">{q.notes}</p>}
+
+      {q.internalNotes && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <span className="mr-2 font-medium">Interne Notiz</span>
+          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs">nur intern sichtbar</span>
+          <p className="mt-1 whitespace-pre-line">{q.internalNotes}</p>
+        </div>
+      )}
+
+      {q.kind === "ANGEBOT" && (status === "DRAFT" || status === "SENT" || status === "EXPIRED") && <ShareLinkPanel documentId={q.id} />}
+
+      <AttachmentPanel docType="QUOTE" docId={q.id} initial={attachments.map((a) => ({ id: a.id, filename: a.filename, mime: a.mime, sizeBytes: a.sizeBytes }))} />
+
+      <DocumentChain orgId={org.id} type="QUOTE" id={q.id} />
+
+      <EmailHistory docType={q.kind as EmailDocType} docId={q.id} />
     </div>
   );
 }
