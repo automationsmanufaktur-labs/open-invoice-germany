@@ -1,6 +1,11 @@
 import Link from "next/link";
-import { prisma } from "@/lib/db";
-import { intervalLabel } from "@/lib/recurring";
+import { getActiveOrg } from "@/lib/org";
+import { listRecurring } from "@/domain/document/list";
+import { availableActions } from "@/domain/document/actions";
+import { FilterBar, type FilterField } from "@/components/list/FilterBar";
+import { Pagination } from "@/components/list/Pagination";
+import { RowActionsMenu } from "@/components/list/RowActionsMenu";
+import { loadListPage } from "@/lib/list-page";
 
 export const dynamic = "force-dynamic";
 
@@ -14,11 +19,36 @@ function deDate(d: Date | null) {
   return d ? new Intl.DateTimeFormat("de-DE").format(d) : "—";
 }
 
-export default async function AbosPage() {
-  const recs = await prisma.recurringInvoice.findMany({
-    include: { customer: { select: { name: true } }, _count: { select: { invoices: true } } },
-    orderBy: [{ status: "asc" }, { nextRunDate: "asc" }],
-  });
+type SP = Record<string, string | string[] | undefined>;
+
+function firstOf(v: string | string[] | undefined): string | undefined {
+  return Array.isArray(v) ? v[0] : v;
+}
+
+export default async function AbosPage({ searchParams }: { searchParams: Promise<SP> }) {
+  const sp = await searchParams;
+  const values: Record<string, string | undefined> = {
+    q: firstOf(sp.q),
+    status: firstOf(sp.status),
+  };
+
+  const org = await getActiveOrg();
+  // Fix-Welle (B1): siehe rechnungen/page.tsx.
+  const result = await loadListPage(sp, (f) => listRecurring(org.id, f));
+
+  const fields: FilterField[] = [
+    { type: "text", name: "q", label: "Suche", placeholder: "Bezeichnung, Kunde…" },
+    {
+      type: "select",
+      name: "status",
+      label: "Status",
+      options: [
+        { value: "ACTIVE", label: "Aktiv" },
+        { value: "PAUSED", label: "Pausiert" },
+        { value: "ENDED", label: "Beendet" },
+      ],
+    },
+  ];
 
   return (
     <div className="space-y-6">
@@ -33,9 +63,11 @@ export default async function AbosPage() {
         Nummernkreis und Audit wie jede andere Rechnung.
       </p>
 
-      {recs.length === 0 ? (
+      <FilterBar basePath="/abos" fields={fields} values={values} />
+
+      {result.rows.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-300 bg-white p-10 text-center text-slate-500">
-          Noch keine Abos.{" "}
+          Keine Abos gefunden.{" "}
           <Link href="/abos/neu" className="font-medium text-indigo-600 hover:underline">
             Lege dein erstes Abo an.
           </Link>
@@ -47,15 +79,15 @@ export default async function AbosPage() {
               <tr>
                 <th className="px-4 py-3">Bezeichnung</th>
                 <th className="px-4 py-3">Kunde</th>
-                <th className="px-4 py-3">Rhythmus</th>
                 <th className="px-4 py-3">Nächste Rechnung</th>
-                <th className="px-4 py-3 text-right">Erzeugt</th>
                 <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {recs.map((r) => {
+              {result.rows.map((r) => {
                 const s = STATUS_LABEL[r.status] ?? { text: r.status, cls: "bg-slate-100 text-slate-600" };
+                const actions = availableActions({ kind: "RECURRING", type: "RECURRING", status: r.status, isDraft: false });
                 return (
                   <tr key={r.id} className="hover:bg-slate-50">
                     <td className="px-4 py-3">
@@ -63,18 +95,20 @@ export default async function AbosPage() {
                         {r.title}
                       </Link>
                     </td>
-                    <td className="px-4 py-3 text-slate-600">{r.customer.name}</td>
-                    <td className="px-4 py-3 text-slate-600">{intervalLabel(r.interval, r.intervalCount)}</td>
+                    <td className="px-4 py-3 text-slate-600">{r.customerName}</td>
                     <td className="px-4 py-3 text-slate-600">{r.status === "ENDED" ? "—" : deDate(r.nextRunDate)}</td>
-                    <td className="tabular px-4 py-3 text-right text-slate-600">{r._count.invoices}</td>
                     <td className="px-4 py-3">
                       <span className={`rounded px-2 py-0.5 text-xs font-medium ${s.cls}`}>{s.text}</span>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <RowActionsMenu kind="RECURRING" id={r.id} actions={actions} openHref={`/abos/${r.id}`} editHref={`/abos/${r.id}/bearbeiten`} />
                     </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+          <Pagination basePath="/abos" searchParams={values} total={result.total} limit={result.limit} offset={result.offset} />
         </div>
       )}
     </div>

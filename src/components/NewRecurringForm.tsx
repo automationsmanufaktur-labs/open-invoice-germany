@@ -45,20 +45,89 @@ function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export function NewRecurringForm({ customers, products }: { customers: CustomerOption[]; products: ProductOption[] }) {
+interface EmailTemplateOption {
+  id: string;
+  name: string;
+}
+
+export interface RecurringInitialValues {
+  title: string;
+  interval: string;
+  intervalCount: number;
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD oder ""
+  maxRuns: string; // Zahl als String oder ""
+  paymentTermsDays: number;
+  autoFinalize: boolean;
+  autoSend: boolean;
+  emailTemplateId: string;
+  showPeriodText: boolean;
+  notes: string;
+  /** Steuerschema des Abos (upstream 516def3) — im Bearbeiten-Modus nur lesend. */
+  taxScheme?: string;
+  /** Waehrung des Abos (upstream 3b11ffa) — im Bearbeiten-Modus nur lesend. */
+  currency?: string;
+  lines: LineState[];
+}
+
+export function NewRecurringForm({
+  customers,
+  products,
+  emailTemplates = [],
+  defaultAutoFinalize = false,
+  defaultAutoSend = false,
+  defaultCurrency = "EUR",
+  defaultShowPeriodText = true,
+  mode = "create",
+  recurringId,
+  customerName,
+  initial,
+}: {
+  customers: CustomerOption[];
+  products: ProductOption[];
+  /** INVOICE-Vorlagen der Organisation (Phase 8b, §43: emailTemplateId — Auswahl fuer den
+   *  automatischen Versand, siehe autoSend). */
+  emailTemplates?: EmailTemplateOption[];
+  /** Vorbelegung aus DocumentSettings.recurringAutoFinalizeDefault (Phase 7, §33). */
+  defaultAutoFinalize?: boolean;
+  /** Vorbelegung aus DocumentSettings.recurringAutoSendDefault (Phase 7, §33). */
+  defaultAutoSend?: boolean;
+  /** Vorbelegung aus DocumentSettings.defaultCurrency. */
+  defaultCurrency?: string;
+  /** Vorbelegung aus DocumentSettings.recurringInsertPeriodText (Phase 8b, §43) — wird
+   *  beim Anlegen als Ausgangswert des Abo-Felds `showPeriodText` uebernommen. */
+  defaultShowPeriodText?: boolean;
+  /** Fix-Runde 1 (Koordinator, Abo-Bearbeiten-UI): "edit" schickt ein PATCH
+   *  (`{patch: {...}}`, `updateRecurringInvoice`) statt eines POST, blendet die
+   *  Kundenauswahl aus (customerId ist nicht Teil von `updateRecurringSchema` — kein
+   *  Kundenwechsel vorgesehen, siehe Task-4-Report) und zeigt stattdessen `customerName`
+   *  nur lesend an. */
+  mode?: "create" | "edit";
+  /** Erforderlich bei `mode="edit"` — Ziel-ID fuer `PATCH /api/recurring/[id]`. */
+  recurringId?: string;
+  /** Nur bei `mode="edit"` angezeigt (read-only, kein Kundenwechsel). */
+  customerName?: string;
+  /** Vorbelegung bei `mode="edit"` aus dem bestehenden Abo. */
+  initial?: RecurringInitialValues;
+}) {
   const router = useRouter();
-  const [title, setTitle] = useState("");
+  const [title, setTitle] = useState(initial?.title ?? "");
   const [customerId, setCustomerId] = useState(customers[0]?.id ?? "");
-  const [interval, setInterval] = useState("MONTHLY");
-  const [intervalCount, setIntervalCount] = useState("1");
-  const [startDate, setStartDate] = useState(todayISO());
-  const [endDate, setEndDate] = useState("");
-  const [paymentTermsDays, setPaymentTermsDays] = useState("14");
-  const [autoFinalize, setAutoFinalize] = useState(false);
-  const [notes, setNotes] = useState("");
-  const [scheme, setScheme] = useState("REGULAR");
-  const [currency, setCurrency] = useState("EUR");
-  const [lines, setLines] = useState<LineState[]>([emptyLine()]);
+  const [interval, setInterval] = useState(initial?.interval ?? "MONTHLY");
+  const [intervalCount, setIntervalCount] = useState(String(initial?.intervalCount ?? 1));
+  const [startDate, setStartDate] = useState(initial?.startDate ?? todayISO());
+  const [endDate, setEndDate] = useState(initial?.endDate ?? "");
+  // Phase 8b (§43): harte Obergrenze der Laeufe (RecurringInvoice.maxRuns, Task 1).
+  const [maxRuns, setMaxRuns] = useState(initial?.maxRuns ?? "");
+  const [paymentTermsDays, setPaymentTermsDays] = useState(String(initial?.paymentTermsDays ?? 14));
+  const [autoFinalize, setAutoFinalize] = useState(initial?.autoFinalize ?? defaultAutoFinalize);
+  const [autoSend, setAutoSend] = useState(initial?.autoSend ?? defaultAutoSend);
+  const [emailTemplateId, setEmailTemplateId] = useState(initial?.emailTemplateId ?? "");
+  const [showPeriodText, setShowPeriodText] = useState(initial?.showPeriodText ?? defaultShowPeriodText);
+  const [notes, setNotes] = useState(initial?.notes ?? "");
+  const [scheme, setScheme] = useState(initial?.taxScheme ?? "REGULAR");
+  const [currency, setCurrency] = useState(initial?.currency ?? defaultCurrency);
+  const [lines, setLines] = useState<LineState[]>(initial?.lines.length ? initial.lines : [emptyLine()]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const isRegular = scheme === "REGULAR";
@@ -80,8 +149,53 @@ export function NewRecurringForm({ customers, products }: { customers: CustomerO
     e.preventDefault();
     setBusy(true);
     setError(null);
+
     const notice = SCHEME_NOTICE_RECURRING[scheme];
     const finalNotes = notice ? `${notice}${notes ? " — " + notes : ""}` : notes || undefined;
+
+    const lineInputs = lines.map((l) => ({
+      description: l.description,
+      quantityMilli: toMilli(l.quantity),
+      unit: l.unit,
+      unitNetPriceCents: toCents(l.price),
+      taxRate: isRegular ? l.taxRate : 0,
+      taxCategory: SCHEME_CATEGORY_RECURRING[scheme] ?? "S",
+      discountPermille: 0,
+    }));
+
+    if (mode === "edit") {
+      // Fix-Runde 1: PATCH mit {patch: {...}} (updateRecurringSchema) — bewusst KEIN
+      // customerId (kein Kundenwechsel vorgesehen, siehe Task-4-Report).
+      const patch = {
+        title,
+        interval,
+        intervalCount: Number(intervalCount) || 1,
+        startDate,
+        endDate: endDate || null,
+        maxRuns: maxRuns ? Number(maxRuns) : null,
+        paymentTermsDays: Number(paymentTermsDays) || 14,
+        autoFinalize,
+        autoSend,
+        emailTemplateId: emailTemplateId || null,
+        showPeriodText,
+        notes: notes || null,
+        lines: lineInputs,
+      };
+      const res = await fetch(`/api/recurring/${recurringId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ patch }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(j.error ?? "Speichern fehlgeschlagen.");
+        setBusy(false);
+        return;
+      }
+      router.push(`/abos/${recurringId}`);
+      return;
+    }
+
     const body = {
       title,
       customerId,
@@ -89,20 +203,19 @@ export function NewRecurringForm({ customers, products }: { customers: CustomerO
       intervalCount: Number(intervalCount) || 1,
       startDate,
       endDate: endDate || undefined,
+      maxRuns: maxRuns ? Number(maxRuns) : undefined,
       paymentTermsDays: Number(paymentTermsDays) || 14,
       autoFinalize,
+      autoSend,
+      emailTemplateId: emailTemplateId || undefined,
+      showPeriodText,
       taxScheme: scheme,
-      currency: currency,
+      // S5 (Fix-Welle, Final-Review): keine hartcodierte Waehrung — der Selektor ist mit
+      // DocumentSettings.defaultCurrency vorbelegt; ohne Auswahl faellt createRecurring()
+      // weiterhin auf DocumentSettings.defaultCurrency (bzw. EUR) zurueck.
+      currency: currency || undefined,
       notes: finalNotes,
-      lines: lines.map((l) => ({
-        description: l.description,
-        quantityMilli: toMilli(l.quantity),
-        unit: l.unit,
-        unitNetPriceCents: toCents(l.price),
-        taxRate: isRegular ? l.taxRate : 0,
-        taxCategory: SCHEME_CATEGORY_RECURRING[scheme] ?? "S",
-        discountPermille: 0,
-      })),
+      lines: lineInputs,
     };
     const res = await fetch("/api/recurring", {
       method: "POST",
@@ -130,22 +243,33 @@ export function NewRecurringForm({ customers, products }: { customers: CustomerO
           <span className="font-medium text-slate-700">Bezeichnung</span>
           <input className={input} placeholder="z. B. Wartungsvertrag Mustermann" value={title} onChange={(e) => setTitle(e.target.value)} required />
         </label>
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium text-slate-700">Kunde</span>
-          <select className={input} value={customerId} onChange={(e) => setCustomerId(e.target.value)} required>
-            {customers.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        {mode === "edit" ? (
+          // Fix-Runde 1: kein Kundenwechsel beim Bearbeiten (customerId ist nicht Teil
+          // von updateRecurringSchema) — nur lesend anzeigen.
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium text-slate-700">Kunde</span>
+            <span className={`${input} bg-slate-50 text-slate-600`}>{customerName}</span>
+          </label>
+        ) : (
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium text-slate-700">Kunde</span>
+            <select className={input} value={customerId} onChange={(e) => setCustomerId(e.target.value)} required>
+              {customers.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
 
       <div className="grid gap-4 sm:grid-cols-4">
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-medium text-slate-700">Rhythmus</span>
           <select className={input} value={interval} onChange={(e) => setInterval(e.target.value)}>
+            {/* Phase 8b (§43): DAY ergaenzt WEEKLY/MONTHLY/QUARTERLY/YEARLY. */}
+            <option value="DAY">täglich</option>
             <option value="WEEKLY">wöchentlich</option>
             <option value="MONTHLY">monatlich</option>
             <option value="QUARTERLY">vierteljährlich</option>
@@ -166,21 +290,74 @@ export function NewRecurringForm({ customers, products }: { customers: CustomerO
         </label>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-3">
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-medium text-slate-700">Zahlungsziel (Tage)</span>
           <input className={input} type="number" min={0} max={365} value={paymentTermsDays} onChange={(e) => setPaymentTermsDays(e.target.value)} />
         </label>
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="font-medium text-slate-700">Maximale Laeufe (optional)</span>
+          <input
+            className={input}
+            type="number"
+            min={1}
+            value={maxRuns}
+            onChange={(e) => setMaxRuns(e.target.value)}
+            placeholder="unbegrenzt"
+          />
+        </label>
         <label className="flex cursor-pointer items-center gap-2 self-end rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
-          <input type="checkbox" checked={autoFinalize} onChange={(e) => setAutoFinalize(e.target.checked)} />
+          <input type="checkbox" checked={showPeriodText} onChange={(e) => setShowPeriodText(e.target.checked)} />
+          <span className="text-slate-700">Leistungszeitraum-Text auf der Rechnung einfügen</span>
+        </label>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="flex cursor-pointer items-center gap-2 self-end rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
+          <input
+            type="checkbox"
+            checked={autoFinalize}
+            disabled={autoSend}
+            onChange={(e) => setAutoFinalize(e.target.checked)}
+          />
           <span className="text-slate-700">Rechnungen automatisch festschreiben (sofort GoBD-konform &amp; nummeriert)</span>
         </label>
+        <label className="flex cursor-pointer items-center gap-2 self-end rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
+          <input
+            type="checkbox"
+            checked={autoSend}
+            onChange={(e) => {
+              const checked = e.target.checked;
+              setAutoSend(checked);
+              // S4 (Fix-Welle): Versand setzt Festschreibung voraus — sonst ginge eine
+              // Rechnung mit Nummer/GiroCode "ENTWURF" per E-Mail raus.
+              if (checked) setAutoFinalize(true);
+            }}
+          />
+          <span className="text-slate-700">
+            Rechnungen automatisch per E-Mail versenden
+            {autoSend && <span className="block text-xs text-slate-500">Versand setzt Festschreibung voraus.</span>}
+          </span>
+        </label>
+        {autoSend && emailTemplates.length > 0 && (
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium text-slate-700">E-Mail-Vorlage (optional)</span>
+            <select className={input} value={emailTemplateId} onChange={(e) => setEmailTemplateId(e.target.value)}>
+              <option value="">— Standardvorlage —</option>
+              {emailTemplates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-medium text-slate-700">Steuerschema</span>
-          <select className={input} value={scheme} onChange={(e) => setScheme(e.target.value)}>
+          <select className={input} value={scheme} onChange={(e) => setScheme(e.target.value)} disabled={mode === "edit"}>
             <option value="REGULAR">Regelbesteuerung</option>
             <option value="KLEINUNTERNEHMER">Kleinunternehmer (§ 19)</option>
             <option value="REVERSE_CHARGE">Reverse Charge (§ 13b)</option>
@@ -190,7 +367,7 @@ export function NewRecurringForm({ customers, products }: { customers: CustomerO
         </label>
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-medium text-slate-700">Währung</span>
-          <select className={input} value={currency} onChange={(e) => setCurrency(e.target.value)}>
+          <select className={input} value={currency} onChange={(e) => setCurrency(e.target.value)} disabled={mode === "edit"}>
             <option value="EUR">EUR (€)</option>
             <option value="USD">USD ($)</option>
             <option value="CHF">CHF</option>
@@ -252,7 +429,7 @@ export function NewRecurringForm({ customers, products }: { customers: CustomerO
           Nettosumme je Rechnung: <span className="tabular font-medium text-slate-800">{(netCents / 100).toFixed(2)} {currency}</span>
         </span>
         <button type="submit" disabled={busy} className="rounded-md bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60">
-          {busy ? "Speichern…" : "Abo anlegen"}
+          {busy ? "Speichert…" : mode === "edit" ? "Änderungen speichern" : "Abo anlegen"}
         </button>
       </div>
     </form>

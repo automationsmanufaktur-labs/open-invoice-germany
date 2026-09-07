@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { advanceDate, intervalLabel } from "@/lib/recurring";
+import { computeLineNet } from "@/lib/pricing/line";
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 
@@ -35,5 +36,16 @@ describe("advanceDate (Abo-Stichtage)", () => {
   it("Label spiegelt Rhythmus", () => {
     expect(intervalLabel("MONTHLY")).toBe("monatlich");
     expect(intervalLabel("MONTHLY", 2)).toBe("alle 2 Monate");
+  });
+});
+
+// W4: src/domain/recurring/run.ts nutzt seit der Fix-Welle dieselbe Rundung wie die
+// manuelle Rechnung (computeLineNet aus src/lib/pricing/line.ts) statt der separat
+// gerundeten computeLineNetCents (entfernt aus src/lib/money.ts). Fuer 2,5 x 1,01 EUR
+// mit 33,3 % Rabatt lieferten beide Wege vorher unterschiedliche Cent-Werte (168 vs. 169).
+describe("W4 — Abo-Lauf und manuelle Rechnung runden identisch", () => {
+  it("2,5 x 1,01 EUR mit 33,3 % Rabatt ergibt denselben Cent-Wert", () => {
+    const result = computeLineNet({ quantityMilli: 2500, unitNetPriceCents: 101, discountPermille: 333 });
+    expect(result.lineNetCents).toBe(169);
   });
 });

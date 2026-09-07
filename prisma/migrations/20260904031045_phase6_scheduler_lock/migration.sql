@@ -1,0 +1,6 @@
+-- CreateTable
+CREATE TABLE "SchedulerLock" (
+    "job" TEXT NOT NULL PRIMARY KEY,
+    "runId" TEXT NOT NULL,
+    "lockedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

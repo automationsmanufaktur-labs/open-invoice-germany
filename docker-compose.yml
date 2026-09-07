@@ -31,8 +31,27 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: "postgresql://oig@db:5432/openinvoice?schema=public"
+      ATTACHMENTS_DIR: "/app/data/attachments"
       # E-Rechnung-Sidecar (optional, siehe unten):
       # EINVOICE_SERVICE_URL: "http://einvoice:8080"
+      # Scheduler (Mahnwesen/Abos, Phase 6) — Intervall-Loop läuft standardmäßig im
+      # App-Prozess mit (siehe .env.example). Der DB-Mutex (SchedulerLock, ein Primärschlüssel
+      # je Job) macht parallele Job-Ausführung über mehrere App-Repliken/Container hinweg
+      # sicher — nie zwei gleichzeitige Läufe desselben Jobs, auch nicht bei mehreren
+      # Instanzen mit je eigenem Intervall-Loop. Bei mehreren Repliken (hier standardmäßig
+      # nicht der Fall) lohnt sich SCHEDULER_ENABLED=false auf allen außer einer Instanz
+      # bzw. ausschließlich über Cron (/api/cron/run-all, CRON_SECRET) trotzdem, um
+      # unnötige redundante Versuche zu vermeiden (die überzähligen Läufe würden sonst
+      # regelmäßig nur "locked" protokollieren statt echt zu arbeiten).
+      # SCHEDULER_ENABLED: "true"
+      # SCHEDULER_INTERVAL_MINUTES: "15"
+      # CRON_SECRET (Fix-Welle B3): PFLICHT, sobald /api/cron/* genutzt wird — ohne
+      # gesetzten Wert antworten die Routen fail-closed mit 503 (vorher: ohne Secret
+      # anonym erreichbar, loeste Mahn-/Abo-Versand aus). Setze einen echten Zufallswert
+      # (openssl rand -base64 32), sonst bleiben /api/cron/* schlicht gesperrt.
+      CRON_SECRET: ""
+    volumes:
+      - oig-attachments:/app/data/attachments
     ports:
       - "3000:3000"
 
@@ -52,3 +71,4 @@ services:
 
 volumes:
   oig-db:
+  oig-attachments:

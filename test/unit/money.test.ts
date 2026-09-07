@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  computeLineNetCents,
   parseEuroToCents,
   formatCents,
   roundHalfUp,
@@ -12,13 +11,6 @@ describe("money", () => {
     expect(roundHalfUp(2.5)).toBe(3);
     expect(roundHalfUp(-2.5)).toBe(-3);
     expect(roundHalfUp(2.4)).toBe(2);
-  });
-
-  it("computeLineNetCents berücksichtigt Menge und Rabatt", () => {
-    // 2,5 h * 100,00 € = 250,00 €
-    expect(computeLineNetCents(2500, 10000)).toBe(25000);
-    // mit 10 % Rabatt
-    expect(computeLineNetCents(2500, 10000, 100)).toBe(22500);
   });
 
   it("parseEuroToCents akzeptiert DE- und EN-Format", () => {

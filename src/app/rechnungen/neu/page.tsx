@@ -3,6 +3,8 @@ import { prisma } from "@/lib/db";
 import { getActiveOrg } from "@/lib/org";
 import { NewInvoiceForm } from "@/components/NewInvoiceForm";
 import { NeedOrgNotice } from "@/components/NeedOrgNotice";
+import { listPaymentMethods } from "@/domain/payment-method/manage";
+import { loadDocumentSettings } from "@/domain/document/settings";
 
 export const dynamic = "force-dynamic";
 
@@ -15,14 +17,35 @@ export default async function NewInvoicePage() {
     return <NeedOrgNotice />;
   }
 
-  const [customers, products] = await Promise.all([
-    prisma.customer.findMany({ where: { orgId, isArchived: false }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
-    prisma.product.findMany({
+  const [customers, products, paymentMethods, contactRows, addressRows] = await Promise.all([
+    prisma.customer.findMany({
       where: { orgId, isArchived: false },
-      select: { id: true, name: true, unit: true, netPriceCents: true, taxRate: true },
+      select: { id: true, name: true, defaultPaymentMethodId: true, defaultDiscountPermille: true },
       orderBy: { name: "asc" },
     }),
+    prisma.product.findMany({
+      where: { orgId, isArchived: false },
+      select: { id: true, name: true, unit: true, netPriceCents: true, taxRate: true, articleNumber: true },
+      orderBy: { name: "asc" },
+    }),
+    listPaymentMethods(orgId),
+    prisma.contactPerson.findMany({ where: { orgId }, orderBy: { lastName: "asc" } }),
+    prisma.customerAddress.findMany({ where: { orgId }, orderBy: { label: "asc" } }),
   ]);
+  const documentSettings = await loadDocumentSettings(orgId);
+  const contacts = contactRows.map((c) => ({ id: c.id, customerId: c.customerId, label: `${c.firstName} ${c.lastName}${c.role ? ` (${c.role})` : ""}`, isDefault: c.isDefault }));
+  const addresses = addressRows.map((a) => ({
+    id: a.id,
+    customerId: a.customerId,
+    type: a.type as "BILLING" | "SHIPPING" | "OTHER",
+    isDefault: a.isDefault,
+    label: a.label ? `${a.label} — ${a.addressLine1}, ${a.postalCode} ${a.city}` : `${a.addressLine1}, ${a.postalCode} ${a.city}`,
+  }));
+  // SKONTO ist ein reiner Systemcode fuer die automatische Skontobuchung
+  // (detectSkonto) — im Rechnungs-Editor nie manuell waehlbar.
+  const paymentMethodOptions = paymentMethods
+    .filter((m) => m.isActive && m.code !== "SKONTO")
+    .map((m) => ({ id: m.id, name: m.name, paymentTermsDays: m.paymentTermsDays }));
 
   if (customers.length === 0) {
     return (
@@ -44,7 +67,14 @@ export default async function NewInvoicePage() {
         </Link>
         <h1 className="text-2xl font-bold tracking-tight">Neue Rechnung</h1>
       </div>
-      <NewInvoiceForm customers={customers} products={products} />
+      <NewInvoiceForm
+        customers={customers}
+        products={products}
+        paymentMethods={paymentMethodOptions}
+        contacts={contacts}
+        addresses={addresses}
+        offerLastDocument={documentSettings.offerLastDocument}
+      />
     </div>
   );
 }

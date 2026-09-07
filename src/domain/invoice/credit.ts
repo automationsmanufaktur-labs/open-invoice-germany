@@ -5,8 +5,11 @@
  * behält seinen Status (für Voll-Storno siehe cancelInvoice).
  */
 import { dbInternal } from "@/lib/db";
-import { computeLineNetCents } from "@/lib/money";
+import { roundHalfUp } from "@/lib/money";
+import { computeLineNet } from "@/lib/pricing/line";
 import { appendChangeLog } from "@/domain/audit";
+import { logActivity } from "@/domain/activity/log";
+import { linkDocuments } from "@/domain/relations";
 import { finalizeWithinTx } from "./finalize";
 
 export class CreditError extends Error {
@@ -30,6 +33,19 @@ export interface PartialCreditInput {
   notes?: string;
 }
 
+/**
+ * Verteilt einen Beleg-Festbetrag (documentDiscountCents/documentChargeCents) proportional
+ * zum Verhaeltnis von Teilgutschrift-Positionsnetto zu Original-Positionsnetto (Ruling
+ * Fix-Runde 1, Koordinator): `round(amountCents * creditLineTotal / originalLineTotal)`.
+ * Ist `originalLineTotal` 0 (z. B. reine 0%-Rechnung), ist das Ergebnis 0 — es gibt keine
+ * sinnvolle Bezugsgroesse fuer die Aufteilung. Prozentwerte (…Permille) werden davon NICHT
+ * beruehrt und bleiben unveraendert (sie wirken bereits proportional auf die neue Basis).
+ */
+function proportionalCents(amountCents: number, creditLineTotal: number, originalLineTotal: number): number {
+  if (originalLineTotal === 0) return 0;
+  return roundHalfUp((amountCents * creditLineTotal) / originalLineTotal);
+}
+
 export async function createPartialCreditNote(
   invoiceId: string,
   input: PartialCreditInput,
@@ -43,11 +59,43 @@ export async function createPartialCreditNote(
   return dbInternal.$transaction(async (tx) => {
     const original = await tx.invoice.findUnique({
       where: { id: invoiceId },
-      select: { id: true, orgId: true, customerId: true, number: true, taxScheme: true, currency: true, status: true, type: true },
+      select: {
+        id: true, orgId: true, customerId: true, number: true, taxScheme: true, currency: true, status: true, type: true,
+        sellerSnapshotJson: true, buyerSnapshotJson: true, contactSnapshotJson: true,
+        documentDiscountPermille: true, documentDiscountCents: true,
+        documentChargePermille: true, documentChargeCents: true, documentChargeReason: true,
+        lines: { select: { lineNetCents: true } },
+      },
     });
     if (!original) throw new CreditError("Rechnung nicht gefunden.");
     if (original.status === "DRAFT") throw new CreditError("Nur festgeschriebene Rechnungen können (teil-)gutgeschrieben werden.");
     if (original.type === "CREDIT_NOTE") throw new CreditError("Eine Gutschrift kann nicht gutgeschrieben werden.");
+
+    // Original-Positionsnetto VOR Beleganpassung (= taxBreakdown.lineTotalCents beim
+    // Festschreiben) — Bezugsgroesse fuer die proportionale Aufteilung der Festbetraege.
+    const originalLineTotal = original.lines.reduce((s, l) => s + l.lineNetCents, 0);
+
+    const lineNetPosValues = input.lines.map((l) => computeLineNet({ quantityMilli: l.quantityMilli, unitNetPriceCents: Math.abs(l.unitNetPriceCents) }).lineNetCents);
+    const creditLineTotal = lineNetPosValues.reduce((s, v) => s + v, 0);
+    const creditLines = input.lines.map((l, i) => {
+      const unitPos = Math.abs(l.unitNetPriceCents);
+      const lineNetPos = lineNetPosValues[i];
+      return {
+        position: i + 1,
+        description: l.description,
+        quantityMilli: l.quantityMilli,
+        unit: l.unit ?? "C62",
+        unitNetPriceCents: -unitPos,
+        taxRate: l.taxRate,
+        taxCategory: l.taxCategory,
+        discountPermille: 0,
+        discountCents: 0,
+        lineNetCents: -lineNetPos,
+      };
+    });
+
+    const documentDiscountCents = proportionalCents(original.documentDiscountCents, creditLineTotal, originalLineTotal);
+    const documentChargeCents = proportionalCents(original.documentChargeCents, creditLineTotal, originalLineTotal);
 
     const credit = await tx.invoice.create({
       data: {
@@ -60,27 +108,28 @@ export async function createPartialCreditNote(
         issueDate: now,
         notes: `Teilgutschrift zu Rechnung ${original.number}.${input.notes ? " " + input.notes : ""}`,
         correctsInvoiceId: original.id,
+        // Prozentwerte unveraendert uebernehmen (applyDocumentAdjustments ist vorzeichen-
+        // invariant, siehe Ruling Task-1-Review); Festbetraege proportional zum Verhaeltnis
+        // Teilgutschrift-/Original-Positionsnetto (Ruling Fix-Runde 1).
+        documentDiscountPermille: original.documentDiscountPermille,
+        documentDiscountCents,
+        documentChargePermille: original.documentChargePermille,
+        documentChargeCents,
+        documentChargeReason: original.documentChargeReason,
         lines: {
-          create: input.lines.map((l, i) => {
-            const unitPos = Math.abs(l.unitNetPriceCents);
-            const lineNetPos = computeLineNetCents(l.quantityMilli, unitPos, 0);
-            return {
-              position: i + 1,
-              description: l.description,
-              quantityMilli: l.quantityMilli,
-              unit: l.unit ?? "C62",
-              unitNetPriceCents: -unitPos,
-              taxRate: l.taxRate,
-              taxCategory: l.taxCategory,
-              discountPermille: 0,
-              lineNetCents: -lineNetPos,
-            };
-          }),
+          create: creditLines,
         },
       },
     });
 
-    const finalized = await finalizeWithinTx(tx, credit.id, { actor, now });
+    const finalized = await finalizeWithinTx(tx, credit.id, {
+      actor,
+      now,
+      // Teilgutschrift berichtigt genau die Original-Rechnung: gleicher Empfaenger/Verkaeufer wie dort.
+      inheritSnapshotFrom: { sellerSnapshotJson: original.sellerSnapshotJson, buyerSnapshotJson: original.buyerSnapshotJson, contactSnapshotJson: original.contactSnapshotJson },
+    });
+
+    await linkDocuments(tx, { orgId: original.orgId, fromType: "INVOICE", fromId: finalized.id, toType: "INVOICE", toId: original.id, relationType: "CORRECTS" });
 
     await appendChangeLog(tx, {
       orgId: original.orgId,
@@ -90,6 +139,15 @@ export async function createPartialCreditNote(
       actor,
       at: now,
       diff: { partialCreditNote: finalized.number, grossTotalCents: finalized.grossTotalCents },
+    });
+    await logActivity(tx, {
+      orgId: original.orgId,
+      entityType: "INVOICE",
+      entityId: original.id,
+      type: "CREDIT_NOTE_CREATED",
+      actor,
+      at: now,
+      data: { creditNote: finalized.number },
     });
 
     return { originalId: original.id, originalNumber: original.number, creditNote: finalized };

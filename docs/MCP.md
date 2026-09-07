@@ -81,14 +81,57 @@ Claude ruft im Hintergrund die passenden Tools auf (`setup_company` → `upsert_
 | `finalize_invoice` | Festschreiben — prüft Pflichtangaben, vergibt Nummer, macht unveränderbar |
 | `cancel_invoice` | Storno-Gutschrift (Original bleibt erhalten) |
 | `credit_invoice` | Teilgutschrift / Teilerstattung (Original bleibt festgeschrieben) |
-| `record_payment` | Zahlungseingang erfassen → Status (bezahlt/teilbezahlt) |
-| `create_dunning` | Nächste Mahnstufe (Zahlungserinnerung → 1./2. Mahnung, Verzugszins § 288 BGB + 40-€-Pauschale B2B) |
-| `get_invoice` / `list_invoices` | Anzeigen/Auflisten |
+| `record_payment` | Zahlungseingang erfassen → Status (bezahlt/teilbezahlt); optional `note` (Freitext, z. B. „telefonisch avisiert") |
+| `create_dunning` | Nächste fällige Mahnstufe erzeugen (frei konfigurierbare Stufen, Verzugszins § 288 BGB + Mahnkosten ab Stufe 2 + 40-€-Pauschale B2B, `force` überspringt die Fälligkeitsprüfung) |
+| `send_dunning` | Eine erstellte Mahnung per E-Mail versenden (dieselbe Mailpipeline wie Rechnungen/Angebote) |
+| `set_dunning_state` | Mahnprozess einer Rechnung pausieren (mit Datum), beenden oder wieder aktivieren |
+| `list_overdue_invoices` | Mahnübersicht: alle überfälligen, offenen Rechnungen (Widgets + Zeilen, Fälligkeits-Aging), optional nach Mahnprozess-Status gefiltert |
+| `run_scheduler_job` | Scheduler-Job(s) manuell anstoßen (`dunning`, `recurring`, oder beide — dieselbe Runner-Funktion wie der eingebaute Loop/Cron) |
+| `get_invoice` | Anzeigen |
+| `list_invoices` | Auflisten mit Filter (Status inkl. wirksamem Status fällig/überfällig, Belegtyp, Kunde, Zeitraum, Betrag, Nummer, Zahlungsart, E-Rechnung, Währung, Freitextsuche, Paginierung) — ersetzt die frühere primitive Version ohne Org-Scoping/Filter |
 | `export_invoice` | PDF + XRechnung + ZUGFeRD in Datei + Validierungsreport |
 | `create_document` / `list_documents` | Angebot / Auftragsbestätigung / Proforma |
 | `convert_document_to_invoice` | Dokument → Rechnungs-Entwurf |
+| `convert_document` | Generische Umwandlung: Angebot → AB, Angebot/AB/Proforma → Rechnung, Angebot/AB/Rechnung → Lieferschein (optional Teilmengen) |
+| `create_delivery_note` | Lieferschein ohne Quelldokument anlegen (Direktlieferung) |
+| `set_document_status` | Status eines Angebots/einer AB oder eines Lieferscheins setzen (MARK_SENT/MARK_ACCEPTED/MARK_REJECTED/MARK_CREATED/MARK_DELIVERED/CANCEL/ARCHIVE/UNARCHIVE) |
+| `duplicate_document` | Angebot/AB/Proforma, Lieferschein oder Rechnung als neuen Entwurf duplizieren |
 | `create_recurring` / `list_recurring` | Abo / wiederkehrende Rechnung anlegen & auflisten |
 | `run_recurring` | Fällige Abo-Rechnungen erzeugen (alle, oder ein Abo sofort) |
+| `create_share_link` | Angebots-Annahmelink (ohne Login) erzeugen — liefert die URL einmalig in der Antwort |
+| `revoke_share_link` | Angebots-Annahmelink widerrufen |
+| `list_share_links` | Annahme-Links eines Angebots auflisten (Status/Aufrufe/Entscheidung, nie der Klartext-Token) |
+| `update_invoice_draft` | Rechnungsentwurf bearbeiten (nur `DRAFT`) — Kopffelder (Betreff, Bestellnummer BT-13, interne Referenz, Ansprechpartner, Rechnungs-/Lieferadresse) sowie Positionen inkl. `lineType` (ITEM/HEADING/TEXT/SUBTOTAL); Rechnungstyp bleibt unveränderbar |
+| `get_settings` | Einstellungen lesen (`area`: `documents`/`print`/`branding`/`numberRanges`/`dunning`; bei `numberRanges` optional `year`) |
+| `update_document_settings` | Belegeinstellungen teilweise aktualisieren (u. a. Fälligkeitstage, Standardwährung, Angebotsgültigkeit, Automatik-Festschreiben/-Versand) — Merge mit dem aktuellen Stand, nicht angegebene Felder bleiben unverändert; ersetzt das frühere `save_document_settings` vollständig |
+| `update_print_settings` | Globale Druckoptionen teilweise aktualisieren (Fußzeile, Seitenzahlen, Falz-/Lochmarken, Spalten, GiroCode) — Merge |
+| `update_branding_settings` | Briefpapier teilweise aktualisieren (Farbe, Ränder, Schriftgröße, Absender-/Fußzeile) — Merge; `logoPath`/`backgroundPath` werden verworfen, Datei-Upload läuft ausschließlich über die HTTP-Route `/api/settings/branding/upload` |
+| `update_number_range` | Einen Nummernkreis aktualisieren (`docType`, Muster/Präfix/Padding/`yearlyReset`/nächste Nummer) — Merge mit dem laufenden Jahr; lehnt ein Zurückdrehen unterhalb bereits vergebener Nummern ab |
+| `update_dunning_settings` | Org-weite Mahnwesen-Einstellungen teilweise aktualisieren (Auto-Erstellung/-Versand, Basiszins) — Merge |
+| `list_dunning_stages` | Konfigurierte Mahnstufen einer Organisation auflisten |
+| `update_dunning_stage` | Eine Mahnstufe teilweise aktualisieren (`id` + Felder) — Merge mit dem aktuellen Stand |
+| `add_attachment` / `list_attachments` / `remove_attachment` | Beleganhänge verwalten (Rechnung/Angebot/Lieferschein/Abo/Mahnung) — Upload als Base64, dieselben Grenzen wie im UI (10 MB je Datei, 50 MB je Beleg) |
+| `create_partial_invoice` | Teilrechnung aus einem Angebot/einer AB oder einem Lieferschein — Prozent, Netto-/Bruttobetrag, oder einzelne Positionen/Mengen |
+| `create_downpayment_invoice` | Abschlagsrechnung vor Leistungserbringung (nur aus Angebot/AB) — Prozent oder Betrag, netto oder brutto; löst § 13 Abs. 1 Nr. 1 Buchst. a Satz 4 UStG aus |
+| `create_final_invoice` | Schlussrechnung über die Gesamtleistung — setzt mindestens eine festgeschriebene, nicht stornierte Abschlagsrechnung voraus; setzt die Abschläge samt darauf entfallender Steuer automatisch ab (§ 14 Abs. 5 UStG) |
+| `get_billing_state` | Abrechnungsstand eines Angebots/einer AB (NONE/PARTIAL/FULL, abgerechnetes Promille, Summe der Abschläge) |
+| `list_customer_addresses` | Alle Adressen eines Kunden auflisten (Typ Rechnung/Lieferung/Sonstige, Label, Standard-Kennzeichen) |
+| `upsert_customer_address` | Adresse anlegen oder ändern (`id` optional — ohne `id` neu, mit `id` Update); `isDefault: true` setzt sie zum Standard des jeweiligen Typs |
+| `delete_customer_address` | Adresse löschen (bestehende Beleg-Snapshots bleiben unverändert, Beleg-Referenzen werden auf leer gesetzt) |
+| `list_contact_persons` | Alle Ansprechpartner eines Kunden auflisten |
+| `upsert_contact_person` | Ansprechpartner anlegen oder ändern (`id` optional); `isDefault: true` setzt ihn zum kundenweiten Standard |
+| `delete_contact_person` | Ansprechpartner löschen (analog Adresse) |
+| `update_customer_defaults` | Die zehn Kundenvorgaben (Standardwährung, Standard-Rabatt, Rechnungs-/Angebots-E-Mail + CC, E-Rechnung bevorzugt, Bestellreferenz, Liefer-/Zahlungsbedingungstext, Sprache) als **Vollersatz** setzen — ein weggelassenes Feld wird zurückgesetzt |
+| `list_custom_fields` | Organisationsweite Kundenfeld-Definitionen auflisten (Schlüssel, Typ, Pflicht, Reihenfolge) |
+| `upsert_custom_field` | Kundenfeld-Definition anlegen oder ändern (`id` optional); Schlüssel-Konflikt innerhalb derselben Organisation liefert einen Fehler |
+| `set_customer_custom_fields` | Kundenfeldwerte eines Kunden setzen — validiert strikt gegen die aktiven Definitionen (unbekannte Schlüssel werden abgelehnt) |
+| `take_over_last_document` | Letzten passenden Vorgängerbeleg (Rechnung/Angebot/AB) eines Kunden finden und daraus Positionen/Texte/Bedingungen/Preise als Vorschlag liefern (§32) — meldet in Klartext, wenn kein Vorgängerbeleg existiert |
+| `get_dashboard` | Dashboard-Kennzahlen: offen/fällig/überfällig, „fällig diese Woche", teilbezahlt, Anzahl mahnwürdiger Rechnungen, Aging-Buckets, Umsatz laufender Monat, letzte Belege, offene Angebote |
+| `get_customer_overview` | Kunden-KPIs (offen/überfällig/Gesamtumsatz/letzte Aktivität) eines einzelnen Kunden |
+| `get_timeline` | Chronologische Historie eines Belegs (`kind`: Rechnung/Angebot/Lieferschein + `doc`-ID) — Anlage, Änderungen, Festschreibung, Versand, Zahlungen, Mahnungen, Statuswechsel |
+| `list_notifications` | Benachrichtigungen auflisten (optional nur ungelesen, `limit`) |
+| `mark_notifications_read` | Benachrichtigungen als gelesen markieren (einzelne IDs oder alle) |
+| `update_recurring_invoice` | Bestehendes Abo teilweise aktualisieren (Titel, Rhythmus inkl. täglich, Start-/Enddatum, maximale Läufe, Zahlungsfrist, Positionen, Auto-Festschreiben/-Versand, E-Mail-Vorlage, Leistungszeitraum-Text) — Merge, kein Kundenwechsel möglich |
 
 ## 4. Was die KI **nicht** kaputt machen kann
 
