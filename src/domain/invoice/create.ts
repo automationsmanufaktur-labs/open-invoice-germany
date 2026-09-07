@@ -58,6 +58,7 @@ export async function createDraftInvoice(
         buyerReference: input.buyerReference,
         notes: input.notes,
         paymentTerms: input.paymentTerms,
+        internalNotes: input.internalNotes,
         netTotalCents: totals.netTotalCents,
         taxTotalCents: totals.taxTotalCents,
         grossTotalCents: totals.grossTotalCents,

@@ -15,6 +15,7 @@ import { dbInternal } from "@/lib/db";
 import { computeLineNetCents } from "@/lib/money";
 import { computeTaxBreakdown } from "@/lib/tax";
 import { appendChangeLog } from "@/domain/audit";
+import { linkDocuments } from "@/domain/relations";
 import { finalizeWithinTx } from "@/domain/invoice/finalize";
 import { advanceDate, type RecurInterval } from "@/lib/recurring";
 import { RecurringError } from "./create";
@@ -80,6 +81,8 @@ async function emitOne(recurringId: string, now: Date, actor: string): Promise<{
         lines: { create: lines },
       },
     });
+
+    await linkDocuments(tx, { orgId: rec.orgId, fromType: "INVOICE", fromId: invoice.id, toType: "RECURRING", toId: rec.id, relationType: "GENERATED_BY" });
 
     await appendChangeLog(tx, {
       orgId: rec.orgId,

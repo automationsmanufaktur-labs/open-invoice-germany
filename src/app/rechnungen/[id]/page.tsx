@@ -62,6 +62,11 @@ export default async function InvoiceDetail({
             {TYPE_TITLE[invoice.type] ?? "Beleg"} {invoice.number ?? "(Entwurf)"}
           </h1>
           <StatusBadge status={invoice.status} />
+          {invoice.snapshotSource === "MIGRATION" && (
+            <span className="inline-block rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+              Adressstand per Migration eingefroren
+            </span>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <a
@@ -197,6 +202,14 @@ export default async function InvoiceDetail({
       </div>
 
       {invoice.notes && <p className="text-sm text-slate-600">{invoice.notes}</p>}
+
+      {invoice.internalNotes && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <span className="mr-2 font-medium">Interne Notiz</span>
+          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs">nur intern sichtbar</span>
+          <p className="mt-1 whitespace-pre-line">{invoice.internalNotes}</p>
+        </div>
+      )}
 
       {isInvoiceType && !isDraft && !isCancelled && (
         <section className="space-y-4 rounded-lg border border-slate-200 bg-white p-5">

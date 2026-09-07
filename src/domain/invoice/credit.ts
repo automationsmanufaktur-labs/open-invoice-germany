@@ -7,6 +7,7 @@
 import { dbInternal } from "@/lib/db";
 import { computeLineNetCents } from "@/lib/money";
 import { appendChangeLog } from "@/domain/audit";
+import { linkDocuments } from "@/domain/relations";
 import { finalizeWithinTx } from "./finalize";
 
 export class CreditError extends Error {
@@ -43,7 +44,10 @@ export async function createPartialCreditNote(
   return dbInternal.$transaction(async (tx) => {
     const original = await tx.invoice.findUnique({
       where: { id: invoiceId },
-      select: { id: true, orgId: true, customerId: true, number: true, taxScheme: true, currency: true, status: true, type: true },
+      select: {
+        id: true, orgId: true, customerId: true, number: true, taxScheme: true, currency: true, status: true, type: true,
+        sellerSnapshotJson: true, buyerSnapshotJson: true,
+      },
     });
     if (!original) throw new CreditError("Rechnung nicht gefunden.");
     if (original.status === "DRAFT") throw new CreditError("Nur festgeschriebene Rechnungen können (teil-)gutgeschrieben werden.");
@@ -80,7 +84,14 @@ export async function createPartialCreditNote(
       },
     });
 
-    const finalized = await finalizeWithinTx(tx, credit.id, { actor, now });
+    const finalized = await finalizeWithinTx(tx, credit.id, {
+      actor,
+      now,
+      // Teilgutschrift berichtigt genau die Original-Rechnung: gleicher Empfaenger/Verkaeufer wie dort.
+      inheritSnapshotFrom: { sellerSnapshotJson: original.sellerSnapshotJson, buyerSnapshotJson: original.buyerSnapshotJson },
+    });
+
+    await linkDocuments(tx, { orgId: original.orgId, fromType: "INVOICE", fromId: finalized.id, toType: "INVOICE", toId: original.id, relationType: "CORRECTS" });
 
     await appendChangeLog(tx, {
       orgId: original.orgId,

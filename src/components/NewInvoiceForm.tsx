@@ -47,6 +47,7 @@ export function NewInvoiceForm({ customers, products }: { customers: CustomerOpt
   const [deliveryDate, setDeliveryDate] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [notes, setNotes] = useState("");
+  const [internalNotes, setInternalNotes] = useState("");
   const [paymentTerms, setPaymentTerms] = useState("Zahlbar innerhalb von 14 Tagen ohne Abzug.");
   const [currency, setCurrency] = useState("EUR");
   const [lines, setLines] = useState<LineState[]>([emptyLine()]);
@@ -82,6 +83,7 @@ export function NewInvoiceForm({ customers, products }: { customers: CustomerOpt
       deliveryDate: deliveryDate || undefined,
       dueDate: dueDate || undefined,
       notes: finalNotes,
+      internalNotes: internalNotes || undefined,
       paymentTerms: paymentTerms || undefined,
       lines: lines.map((l) => ({
         description: l.description,
@@ -211,6 +213,13 @@ export function NewInvoiceForm({ customers, products }: { customers: CustomerOpt
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-medium text-slate-700">Zahlungsbedingungen</span>
           <textarea className={input} rows={2} value={paymentTerms} onChange={(e) => setPaymentTerms(e.target.value)} />
+        </label>
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="font-medium text-slate-700">
+            Interne Notiz
+            <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-normal text-amber-800">nur intern sichtbar</span>
+          </span>
+          <textarea className={input} rows={2} value={internalNotes} onChange={(e) => setInternalNotes(e.target.value)} />
         </label>
       </div>
 

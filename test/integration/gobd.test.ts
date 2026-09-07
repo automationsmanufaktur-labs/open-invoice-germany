@@ -6,6 +6,7 @@ import { cancelInvoice } from "@/domain/invoice/cancel";
 import { createPartialCreditNote } from "@/domain/invoice/credit";
 import { recordPayment } from "@/domain/invoice/payment";
 import { createDunning } from "@/domain/dunning/create";
+import { ensureOrgMasterdata } from "@/domain/masterdata/ensure";
 import { createRecurring } from "@/domain/recurring/create";
 import { emitRecurringNow, runDueRecurring } from "@/domain/recurring/run";
 import { createBusinessDocument } from "@/domain/document/create";
@@ -33,6 +34,7 @@ beforeAll(async () => {
     data: { orgId, name: "Kunde AG", addressLine1: "Marktplatz 2", postalCode: "20095", city: "Hamburg", type: "BUSINESS" },
   });
   customerId = customer.id;
+  await ensureOrgMasterdata(dbInternal, orgId);
 });
 
 afterAll(async () => {
@@ -183,11 +185,24 @@ describe("GoBD: Nummernkreis + Unveränderbarkeit", () => {
     expect(r0.openAmountCents).toBe(13800); // 238 − 100 = 138 €
     expect(r0.dunning.number).toMatch(/^MA-\d{4}-\d{4}$/);
     expect(r0.dunning.interestAmountCents).toBe(0);
+    expect(r0.dunning.stageId).not.toBeNull();
+    const stage0 = await dbInternal.dunningStage.findUnique({ where: { id: r0.dunning.stageId! } });
+    expect(stage0?.order).toBe(0);
 
     const r1 = await createDunning(fin.id, { now: FIX_DATE });
     expect(r1.level).toBe(1); // 1. Mahnung -> Verzugszins + 40-€-Pauschale (B2B)
     expect(r1.dunning.interestAmountCents).toBeGreaterThan(0);
     expect(r1.dunning.flatFee40Cents).toBe(4000);
+    expect(r1.dunning.stageId).not.toBeNull();
+    const stage1 = await dbInternal.dunningStage.findUnique({ where: { id: r1.dunning.stageId! } });
+    expect(stage1?.order).toBe(1);
+
+    // Es gibt nur vier Standardstufen (order 0-3) -> ab Level 4 keine Stufe mehr, kein Fehler.
+    await createDunning(fin.id, { now: FIX_DATE }); // level 2
+    await createDunning(fin.id, { now: FIX_DATE }); // level 3
+    const r4 = await createDunning(fin.id, { now: FIX_DATE });
+    expect(r4.level).toBe(4);
+    expect(r4.dunning.stageId).toBeNull();
   });
 
   it("Abo: Lauf erzeugt Rechnung, schreibt nextRunDate fort, autoFinalize vergibt Nummer", async () => {

@@ -4,6 +4,7 @@
  */
 import { dbInternal } from "@/lib/db";
 import { appendChangeLog } from "@/domain/audit";
+import { ensureOrgMasterdata } from "@/domain/masterdata/ensure";
 import type { RecordPaymentInput } from "@/schemas";
 
 export class PaymentError extends Error {
@@ -26,6 +27,21 @@ export async function recordPayment(invoiceId: string, input: RecordPaymentInput
     if (inv.status === "DRAFT") throw new PaymentError("Zahlung erst nach dem Festschreiben erfassbar.");
     if (inv.status === "CANCELLED") throw new PaymentError("Die Rechnung ist storniert.");
     if (inv.type === "CREDIT_NOTE") throw new PaymentError("Zahlungen werden nur auf Rechnungen erfasst, nicht auf Gutschriften.");
+
+    let method = await tx.paymentMethod.findFirst({
+      where: { orgId: inv.orgId, code: input.method, isActive: true },
+      select: { id: true },
+    });
+    if (!method) {
+      // Selbstheilung: Organisationen ohne Backfill (z. B. Testfixtures) bekommen
+      // die Systemstammdaten hier einmalig nachgezogen, bevor endgueltig geprueft wird.
+      await ensureOrgMasterdata(tx, inv.orgId);
+      method = await tx.paymentMethod.findFirst({
+        where: { orgId: inv.orgId, code: input.method, isActive: true },
+        select: { id: true },
+      });
+    }
+    if (!method) throw new PaymentError(`Zahlungsmethode "${input.method}" ist nicht bekannt oder inaktiv.`);
 
     await tx.payment.create({
       data: {
