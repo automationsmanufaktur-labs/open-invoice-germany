@@ -32,6 +32,18 @@ npm run mcp   # start the MCP server (stdio) / wire it into Claude Code via .mcp
 
 > 🔒 **Data protection (GDPR).** The app core runs **100% locally**, but the MCP feature is optional and **not automatically GDPR-compliant**: when you let a **cloud LLM** (e.g. Claude) create the invoice, the data you describe (customer name, items, amounts = personal data) is sent to that provider and processed on your behalf (Art. 28 GDPR). For business use with real personal data, either use a **local model** (the MCP server is model-agnostic) or a **commercial API with a DPA** — note that Claude **Code/Desktop** always use Anthropic's cloud and the consumer **Pro/Max subscription has no DPA**. List the provider as a sub-processor in your records and privacy policy. Details: **[docs/MCP.md](docs/MCP.md)**. Not legal advice.
 
+## REST API (`/api/v1`)
+
+A versioned, OpenAPI-documented REST API is available under `/api/v1`, calling the exact same domain functions as the UI and the MCP server — same GoBD rules, same § 14 UStG mandatory-field checks. Authentication is via a per-organisation **API key** (Bearer token, scopes `read`/`write`/`send`/`admin`), created under **Einstellungen → API**.
+
+```bash
+curl -H "Authorization: Bearer oig_..." https://your-instance/api/v1/Invoice
+```
+
+Interactive docs (Swagger UI, session login or API key): `GET /api/docs`. Machine-readable spec: `GET /api/v1/openapi.json`. Full walkthrough with curl examples (customer → invoice → finalise → PDF/XRechnung → payment): **[docs/API.md](docs/API.md)**.
+
+Event-driven **webhooks** (`/api/v1/Webhook`, scope `admin`) deliver events like `invoice.finalized` or `payment.recorded` to your own endpoint — HMAC-signed, with retry/backoff and an SSRF-guarded, https-only outbox. Events, payload shape, and signature-verification examples in Node.js and PHP: **[docs/WEBHOOKS.md](docs/WEBHOOKS.md)**.
+
 ## Features
 
 - **Voice control via MCP** (Claude Code/Desktop) — see above.
@@ -40,16 +52,47 @@ npm run mcp   # start the MCP server (stdio) / wire it into Claude Code via .mcp
 - **Tax schemes**: standard rating (19/7/0), small business (§ 19), reverse charge (§ 13b), intra-EU supply, margin scheme (§ 25a), small amount (§ 33).
 - **E-invoice**: **XRechnung** (UBL, EN 16931) **and ZUGFeRD/Factur-X hybrid PDF** (embedded EN-16931 CII), both validated against the **official Schematron** rules (SaxonJS, no Java) — cross-checked by the KoSIT validator in CI.
 - **Documents**: quotes, order confirmations, pro-forma — convertible into an invoice.
+- **Discounts, surcharges & Skonto**: per-line discount (percent + fixed amount) and document-level discount/surcharge (allocated proportionally per tax rate), correctly mapped to `AllowanceCharge` in XRechnung/ZUGFeRD (BG-20/21/27/28); early-payment discount (Skonto, up to two terms) as BT-20 text incl. the `#SKONTO#TAGE=n#PROZENT=x.xx#` convention, with a payment-recording suggestion.
+- **Payment methods**: per-organisation catalogue (system codes + custom), optional customer default, snapshotted on finalisation, mapped to UNTDID 4461 `PaymentMeansCode`.
+- **Partial, down-payment & final invoices** (§ 14 Abs. 5 UStG): bill a percentage/amount/selected lines of a quote or delivery note (**partial invoice**), invoice a deposit before delivery (**down-payment invoice**, e-invoice type code 386), then close out with a **final invoice** that automatically deducts the down payments and their tax (immutable deduction snapshot, BT-113/BT-115/BG-3 in the e-invoice, matching PDF breakdown).
+- **Unified document editor with live preview**: one editor for invoices, quotes/order confirmations/pro-formas and delivery notes, with inline customer/product creation, a one-click PDF preview of the unsaved draft (watermarked, nothing written to the database), drag-and-drop or keyboard (`Alt+↑`/`Alt+↓`, `Enter`-to-add-row) line reordering, headings/text blocks/computed subtotals alongside regular item lines (only item lines go into the e-invoice XML), rich text (restricted markdown — bold/italic/underline, one list level, links) in line descriptions, article numbers, and header fields (subject, order number, internal reference, contact, delivery/billing address).
+- **Attachments**: upload files to any document (invoice, quote, delivery note, dunning, subscription) — 10 MB per file, 50 MB per document, MIME whitelist + magic-byte check, content-addressed storage with dedup, selectable as extra attachments when sending email.
 - **Payments & dunning**: record (partial) payments; staged reminders (payment reminder → 1st/2nd dunning) with **default interest** (§ 288 BGB, day-accurate) + €40 flat fee (B2B), each as a PDF.
 - **Recurring invoices / subscriptions**: weekly–yearly templates, optional auto-finalisation, run via UI/MCP or cron (`npm run recurring:run`).
 - **Credit notes**: full cancellation **or** partial credit, original stays finalised.
+- **Letterhead, print options & number ranges**: per-organisation branding (logo, colour, margins, sender line, footer) with a live preview; ten global print switches (footer, page numbers, fold/punch marks, which columns show) with per-document overrides while still a draft; nine configurable number ranges (quotes, order confirmations, pro-forma, delivery notes, invoices, credit notes, dunnings, plus customer and article numbers) with pattern/prefix/reset and a rewind guard.
+- **PDF layouts** — seven built-in layouts (Standard, Schlicht, Klassik, Modern, Blau, Schwarz, Kompakt), selectable per document type under Settings → Letterhead → Layouts with live preview, overridable per draft document. The layout is frozen when an invoice is finalized. Footer is generated from company master data (four columns) or from three custom text fields.
+- **EPC QR code ("GiroCode")** on invoices — scan-to-pay in any German banking app, built from the same IBAN/amount already on the invoice; fails soft (no code, no error) if a prerequisite is missing (foreign currency, no IBAN, nothing outstanding).
+- **Customer comfort**: multiple addresses (billing/shipping/other) and contact persons per customer with a default flag and document snapshot, ten customer-level defaults (default currency/discount, invoice/quote email + CC, order reference, delivery/payment terms text), organisation-wide custom customer fields (text/number/date/boolean/select) available as `{{customField.<key>}}`, and "take over last document" (lines/texts/terms/prices) when creating a new quote/order confirmation/invoice.
+- **Workflow & UX**: a derived invoice status (due/overdue, never stored) drives every list/filter/dashboard; per-row quick actions (send, record payment, next dunning stage, convert, cancel, …) show only what's actually available for that document's status; filterable/searchable list pages for invoices, quotes, delivery notes and subscriptions; a per-document timeline (creation, sends, payments, dunnings, status changes) backed by a lightweight `ActivityLog` (UX history, **not** a GoBD audit substitute — the hash-chained `ChangeLog` is unchanged); a dashboard (open/due/overdue, aging, this month's revenue, recent documents) on the signed-in home page; a customer detail page with KPIs and per-customer document tabs; in-app notifications (invoice due/overdue, dunning stage reached, quote expiring, email bounced, recurring-invoice failure, invalid e-invoice) with per-type toggles and an optional daily email digest; an editable subscription (recurring invoice) with a run cap, per-subscription email template and period-text override; a collapsible, grouped navigation sidebar with a command palette (⌘K/Ctrl+K) search.
+- **PDF-centered document view**: invoice/document/delivery-note detail pages share one layout — the PDF embedded centre-stage (browser viewer, A4 aspect ratio, download fallback), a status card on the right (customer, dates, totals, payment/dunning), actions up top and a no-JS "more" menu for less-used ones (export, duplicate, cancel, convert), collapsible line items, and `‹`/`›`/`Alt+←`/`Alt+→` to step through the previously opened, filtered list.
 - **PDF export** ("other invoice") with all mandatory fields.
 - **Self-hosted**: SQLite solo without a server **or** PostgreSQL via Docker.
 - **Sign-in**: built-in admin account (scrypt hash + signed session cookie) — app and API protected.
 
 ### Status
 
-MVP. What works: master data/customers/products, quotes & invoices, draft → finalise → cancel, partial credit notes, **payments + dunning (§ 288 BGB)**, **recurring invoices/subscriptions**, PDF + **XRechnung + ZUGFeRD** export, GoBD number range + audit. On the roadmap: DATEV/CSV export, B2G/Leitweg-ID EAS codes, OSS/ZM, multi-user, built-in scheduler. See [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) (MVP / stage 2 / stage 3) and the honest list of **[known limitations](docs/LIMITATIONEN.md)**.
+MVP. What works: master data/customers/products, quotes & invoices, draft → finalise → cancel, partial credit notes, **stage-based dunning with a built-in scheduler (§ 288 BGB)**, **recurring invoices/subscriptions**, PDF + **XRechnung + ZUGFeRD** export, GoBD number range + audit. On the roadmap: DATEV/CSV export, B2G/Leitweg-ID EAS codes, OSS/ZM, multi-user. See [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md) (MVP / stage 2 / stage 3) and the honest list of **[known limitations](docs/LIMITATIONEN.md)**.
+
+## Documents workflow
+
+Quote → order confirmation → delivery note → invoice, all linked:
+
+1. Create a **quote** (draft, editable), send it — status moves `DRAFT → SENT`.
+2. Mark it `ACCEPTED` (or convert it straight into an **order confirmation**).
+3. **Convert** it into a **delivery note** (quantities from the quote/order, over-delivery blocked) and/or into an **invoice draft**.
+4. Every conversion is recorded as a document relation; the **document chain** (visible on every quote/invoice/delivery-note page) shows the full lineage — quote → order confirmation → delivery note → invoice → payments/dunnings.
+5. Billing status (none/partial/full) is derived from those relations, not stored.
+6. Instead of (or alongside) a full invoice, bill a **partial invoice** (percentage/amount/selected lines) or a **down-payment invoice** from a quote/order confirmation, then close out with a **final invoice** — deposits and their tax are deducted automatically (§ 14 Abs. 5 UStG).
+
+Same tools via MCP: `convert_document`, `create_delivery_note`, `set_document_status`, `duplicate_document`, `create_partial_invoice`, `create_downpayment_invoice`, `create_final_invoice`, `get_billing_state`. Details: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md), limitations: [docs/LIMITATIONEN.md](docs/LIMITATIONEN.md).
+
+### Let customers accept quotes online
+
+On a quote's detail page (**Documents → quote**), under "Acceptance link", generate a link — the URL is shown **once** (copy button), and can't be retrieved again afterwards. The customer opens it without logging in, sees the quote and a PDF download, and can accept or reject it (name required, email/comment optional). On decision: status `ACCEPTED`/`REJECTED`, an internal notification email, and — depending on the setting under **Settings → Documents** — an automatic order confirmation or invoice draft. The link can be revoked at any time. For the `{{offer.link}}` placeholder in the quote email template, set `APP_BASE_URL` (`.env`) — otherwise it stays empty.
+
+### Navigation and search
+The left sidebar groups the app into Overview, Sales (quotes, order confirmations, proforma invoices, delivery notes, invoices, credit notes, recurring invoices, dunning) and Administration (customers, products, notifications, settings). The sidebar can be collapsed to icons. The search field at the top (also ⌘K / Ctrl+K) finds documents by number or customer, plus customers and products, and offers quick actions.
 
 ## Tech stack
 
@@ -79,7 +122,74 @@ cp .env.example .env            # switch DATABASE_URL to the postgresql:// line
 docker compose up --build
 ```
 
-`docker-compose.yml` starts the app + PostgreSQL + the **Mustang** sidecar (XRechnung/ZUGFeRD generation & validation). The Postgres schema lives in `prisma/schema.postgres.prisma` (model-identical, only a different datasource).
+`docker-compose.yml` mounts a named volume (`oig-attachments`) at `/app/data/attachments` for document attachments (`ATTACHMENTS_DIR`); back it up alongside `oig-db` — see the operator's notes if self-hosting on a shared server.
+
+**Upgrading an existing instance.** If the database was created with an older
+version using `prisma db push`, it has no migration history. The container will
+refuse to start and print the one command needed. Take a backup first.
+
+**Do not run `migrate resolve` blindly.** The `0_init` baseline reflects the
+current schema, including `RecurringInvoice`, `RecurringInvoiceLine` and
+`Invoice.recurringInvoiceId`. An older instance may predate these tables. If you
+mark the baseline as applied without checking, Prisma believes the schema is
+complete and later queries fail with `column ... does not exist`. Verify first:
+
+```bash
+docker compose run --rm app \
+  npx prisma migrate diff --from-url "$DATABASE_URL" \
+    --to-schema-datamodel prisma/schema.postgres.prisma --script
+```
+
+**Important:** `--to-schema-datamodel` compares against the current model
+(head), not against the `0_init` baseline. The baseline reference is
+`prisma/migrations-postgres/0_init/migration.sql` only. The diff can therefore
+also show tables or columns that were only introduced by a **later** migration
+under `prisma/migrations-postgres/` (e.g. the phase-0 snapshot columns) — those
+must **not** be applied by hand; `migrate deploy` applies them automatically
+after the `resolve` step. To tell which migration introduces a given column,
+run `grep -l "<column name>" prisma/migrations-postgres/*/migration.sql`: if it
+only appears in `0_init`, it belongs to the baseline; if it (also) appears in a
+later migration, it came from there and must not be created by hand.
+
+- **Empty output** (only the comment "This is an empty migration"): the database
+  already matches the baseline. `migrate resolve --applied 0_init` below is safe.
+- **Output contains only `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN` /
+  `CREATE INDEX` / `ALTER TABLE … ADD CONSTRAINT` (foreign keys)**: apply only
+  the statements that belong to `0_init` (see the `grep` rule above); leave out
+  statements for columns/tables that come from later migrations. Review the
+  remaining SQL, apply it with `docker compose run --rm app npx prisma db
+  execute --url "$DATABASE_URL" --stdin`, then continue with `migrate resolve`.
+- **Output contains any `DROP`**: stop. Do not apply it and do not run
+  `migrate resolve`. The database holds data the baseline does not account for —
+  get a second opinion before proceeding.
+
+Once the diff is clean (or has been applied):
+
+```bash
+docker compose run --rm app \
+  npx prisma migrate resolve --config prisma.postgres.config.ts --applied 0_init
+```
+
+After that the container starts normally and future schema changes go through
+`prisma migrate deploy`.
+
+**If a migration entry in `_prisma_migrations` is marked failed**, `migrate
+deploy` refuses to proceed and the container will not start. This is intentional
+(fail-closed) rather than silently continuing on an uncertain schema. Check what
+the migration partially applied, then resolve it with `prisma migrate resolve
+--rolled-back <name>`.
+
+`docker-compose.yml` starts the app + PostgreSQL. The **Mustang** sidecar (XRechnung/ZUGFeRD generation & validation) is an optional, commented-out block (`einvoice-service/` is not shipped) — see the section above. The Postgres schema lives in `prisma/schema.postgres.prisma` (model-identical, only a different datasource).
+
+## Sending emails (E-Mail-Versand einrichten)
+
+SMTP only — no built-in Resend/SES integration (see [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md)). Steps:
+
+1. Go to **Einstellungen → E-Mail-Versand** and enter your SMTP host, port, security mode, credentials, and sender address.
+2. `AUTH_SECRET` (see `.env.example`) also serves as the encryption key for the stored SMTP password — set it before configuring mail, and re-enter the password if you ever rotate `AUTH_SECRET`.
+3. Click **Testmail senden** to verify the configuration before using it on real documents.
+4. Under **Einstellungen → Vorlagen**, adjust the built-in email templates (subject/body/signature) per document type, or add your own; placeholders like `{{document.number}}` are listed in the editor.
+5. Sending is currently plain text only, with no delivery/bounce tracking (status stays `SENT`) — see [docs/LIMITATIONEN.md](docs/LIMITATIONEN.md) for the full list of email limitations.
 
 ## Tests
 

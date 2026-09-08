@@ -6,7 +6,11 @@
  * Gutschriften (CREDIT_NOTE) werden mit positiven Beträgen + TypeCode 381 erzeugt.
  */
 import { create } from "xmlbuilder2";
-import type { EInvoiceData } from "./types";
+import { parseRichText, plainText } from "@/lib/richtext";
+import { deductionsNoteText } from "./deduction-note";
+import { exemptionReasonCode, exemptionReasonText } from "./exemption";
+import { CONSUMER_RETENTION_HINT } from "@/domain/invoice/mandatory";
+import type { EInvoiceData, EInvoiceLine } from "./types";
 
 type XmlNode = ReturnType<typeof create>;
 
@@ -14,6 +18,7 @@ const NS = {
   rsm: "urn:un:unece:uncefact:data:standard:CrossIndustryInvoice:100",
   ram: "urn:un:unece:uncefact:data:standard:ReusableAggregateBusinessInformationEntity:100",
   udt: "urn:un:unece:uncefact:data:standard:UnqualifiedDataType:100",
+  qdt: "urn:un:unece:uncefact:data:standard:QualifiedDataType:100",
 };
 
 function money(cents: number): string {
@@ -30,25 +35,51 @@ function ciiDate(date: Date): string {
   return `${y}${m}${d}`;
 }
 function typeCode(type: string): string {
-  return type === "CREDIT_NOTE" ? "381" : type === "CORRECTION" ? "384" : "380";
+  // Phase 5 — UNTDID 1001: Abschlagsrechnung 386, PARTIAL/FINAL bleiben 380.
+  if (type === "CREDIT_NOTE") return "381";
+  if (type === "CORRECTION") return "384";
+  if (type === "DOWNPAYMENT") return "386";
+  return "380";
 }
-function exemptionReason(category: string): string | null {
-  switch (category) {
-    case "AE":
-      return "Steuerschuldnerschaft des Leistungsempfängers";
-    case "K":
-      return "Innergemeinschaftliche Lieferung";
-    case "G":
-      return "Ausfuhrlieferung";
-    case "E":
-      return "Steuerbefreit";
-    case "Z":
-      return "Nullsatz";
-    case "O":
-      return "Nicht im Inland steuerbar gem. § 3a Abs. 2 UStG";
-    default:
-      return null;
+// BR-DE-23: PayeePartyCreditorFinancialAccount nur bei Überweisung/Lastschrift.
+const ACCOUNT_REQUIRING_CODES = new Set(["58", "59", "30"]);
+
+/** Phase 4b (§8): nur ITEM-Zeilen gehen ins XML — HEADING/TEXT/SUBTOTAL sind reine
+ * PDF-Gliederungszeilen. Fehlt lineType (Alt-Fixtures), wird ITEM angenommen. */
+function isItemLine(line: EInvoiceLine): boolean {
+  return (line.lineType ?? "ITEM") === "ITEM";
+}
+
+/** BG-27/BG-20 — SpecifiedTradeAllowanceCharge (ChargeIndicator false = Rabatt). */
+function appendAllowanceCharge(
+  parent: XmlNode,
+  opts: {
+    isCharge: boolean;
+    amountCents: number;
+    baseCents: number;
+    reason: string;
+    reasonCode?: string;
+    calculationPercent?: number;
+    categoryTax?: { categoryCode: string; taxRate: number };
+  },
+): void {
+  const ac = parent.ele("ram:SpecifiedTradeAllowanceCharge");
+  ac.ele("ram:ChargeIndicator").ele("udt:Indicator").txt(opts.isCharge ? "true" : "false").up().up();
+  if (opts.calculationPercent !== undefined) {
+    ac.ele("ram:CalculationPercent").txt((opts.calculationPercent / 10).toFixed(2)).up();
   }
+  ac.ele("ram:BasisAmount").txt(money(opts.baseCents)).up();
+  ac.ele("ram:ActualAmount").txt(money(opts.amountCents)).up();
+  if (opts.reasonCode) ac.ele("ram:ReasonCode").txt(opts.reasonCode).up();
+  ac.ele("ram:Reason").txt(opts.reason).up();
+  if (opts.categoryTax) {
+    const cat = ac.ele("ram:CategoryTradeTax");
+    cat.ele("ram:TypeCode").txt("VAT").up();
+    cat.ele("ram:CategoryCode").txt(opts.categoryTax.categoryCode).up();
+    cat.ele("ram:RateApplicablePercent").txt(String(opts.categoryTax.taxRate)).up();
+    cat.up();
+  }
+  ac.up();
 }
 
 function appendAddress(parent: XmlNode, party: EInvoiceData["seller"]) {
@@ -70,6 +101,7 @@ export function buildFacturXCII(data: EInvoiceData): string {
     "xmlns:rsm": NS.rsm,
     "xmlns:ram": NS.ram,
     "xmlns:udt": NS.udt,
+    "xmlns:qdt": NS.qdt,
   });
 
   // Kontext / Profil
@@ -88,15 +120,32 @@ export function buildFacturXCII(data: EInvoiceData): string {
   doc.ele("ram:TypeCode").txt(typeCode(data.type)).up();
   doc.ele("ram:IssueDateTime").ele("udt:DateTimeString", { format: "102" }).txt(ciiDate(data.issueDate)).up().up();
   if (data.notes) doc.ele("ram:IncludedNote").ele("ram:Content").txt(data.notes).up().up();
+  // BT-22 (Phase 5) — Abzugsaufstellung der Schlussrechnung als ZUSÄTZLICHES
+  // IncludedNote-Element (mehrfach zulässig), ergänzt einen ggf. vorhandenen Hinweis.
+  if (data.deductions?.length) doc.ele("ram:IncludedNote").ele("ram:Content").txt(deductionsNoteText(data.deductions)).up().up();
+  // § 14 Abs. 4 Nr. 9 / § 14b Abs. 1 Satz 5 UStG — Aufbewahrungshinweis, als ZUSAETZLICHES
+  // IncludedNote-Element (mehrfach zulaessig), Phase 12b Task 5.
+  if (data.consumerRetentionHint) doc.ele("ram:IncludedNote").ele("ram:Content").txt(CONSUMER_RETENTION_HINT).up().up();
   doc.up();
 
   const tx = root.ele("rsm:SupplyChainTradeTransaction");
 
-  // Positionen
-  data.lines.forEach((line, i) => {
+  // Positionen. Phase 4b (§8): nur ITEM-Zeilen; LineID fortlaufend NEU über die
+  // gefilterten ITEMs (nicht die gespeicherte Position, die auch HEADING/TEXT/SUBTOTAL zählt).
+  const itemLines = data.lines.filter(isItemLine);
+  itemLines.forEach((line, i) => {
     const li = tx.ele("ram:IncludedSupplyChainTradeLineItem");
     li.ele("ram:AssociatedDocumentLineDocument").ele("ram:LineID").txt(String(i + 1)).up().up();
-    li.ele("ram:SpecifiedTradeProduct").ele("ram:Name").txt(line.description).up().up();
+    const product = li.ele("ram:SpecifiedTradeProduct");
+    // BT-155 — Artikelnummer. XSD-Reihenfolge: SellerAssignedID VOR Name.
+    if (line.articleNumber) product.ele("ram:SellerAssignedID").txt(line.articleNumber).up();
+    product.ele("ram:Name").txt(line.description).up();
+    // BT-154 — Langtext als Klartext (kein Markdown). XSD-Reihenfolge: Description NACH Name.
+    if (line.descriptionLong) {
+      const text = plainText(parseRichText(line.descriptionLong));
+      if (text) product.ele("ram:Description").txt(text).up();
+    }
+    product.up();
     li
       .ele("ram:SpecifiedLineTradeAgreement")
       .ele("ram:NetPriceProductTradePrice")
@@ -117,6 +166,17 @@ export function buildFacturXCII(data: EInvoiceData): string {
     ltax.ele("ram:CategoryCode").txt(line.taxCategory).up();
     ltax.ele("ram:RateApplicablePercent").txt(String(line.taxRate)).up();
     ltax.up();
+    // BG-27 — Zeilenrabatt.
+    if (line.discountCents) {
+      appendAllowanceCharge(ls, {
+        isCharge: false,
+        amountCents: Math.abs(line.discountCents),
+        baseCents: Math.abs(line.grossLineCents ?? line.lineNetCents),
+        reason: "Rabatt",
+        reasonCode: "95",
+        calculationPercent: line.discountPermille,
+      });
+    }
     ls.ele("ram:SpecifiedTradeSettlementLineMonetarySummation").ele("ram:LineTotalAmount").txt(amt(line.lineNetCents)).up().up();
     ls.up();
     li.up();
@@ -127,6 +187,13 @@ export function buildFacturXCII(data: EInvoiceData): string {
   agr.ele("ram:BuyerReference").txt(data.buyerReference || data.number).up();
 
   const seller = agr.ele("ram:SellerTradeParty");
+  // BT-29 — Verkäuferkennung (ram:ID, unqualifiziert). Phase 12b: BR-CO-26 verlangt BT-29,
+  // BT-30 ODER BT-31 — BT-32 (Steuernummer, s.u.) genügt der Kernregel NICHT (nur BR-DE).
+  // Ohne USt-IdNr. (Kleinunternehmer) wird daher die Steuernummer zusätzlich als
+  // generische Verkäuferkennung ausgewiesen, damit BR-CO-26 erfüllt ist.
+  if (!data.seller.vatId && data.seller.taxNumber) {
+    seller.ele("ram:ID").txt(data.seller.taxNumber).up();
+  }
   seller.ele("ram:Name").txt(data.seller.name).up();
   appendAddress(seller, data.seller);
   if (data.seller.vatId) {
@@ -144,26 +211,53 @@ export function buildFacturXCII(data: EInvoiceData): string {
     buyer.ele("ram:SpecifiedTaxRegistration").ele("ram:ID", { schemeID: "VA" }).txt(data.buyer.vatId).up().up();
   }
   buyer.up();
+
+  // BT-13 — Bestellnummer des Kunden (Phase 4b). CII-Reihenfolge: nach BuyerTradeParty,
+  // vor SpecifiedTradeSettlement/HeaderTradeDelivery.
+  if (data.orderNumber) {
+    agr.ele("ram:BuyerOrderReferencedDocument").ele("ram:IssuerAssignedID").txt(data.orderNumber).up().up();
+  }
   agr.up();
 
-  // Lieferung
+  // Lieferung (BG-13/BG-15). CII-Reihenfolge: ShipToTradeParty VOR ActualDeliverySupplyChainEvent.
   const del = tx.ele("ram:ApplicableHeaderTradeDelivery");
+  const deliverToCountry = data.deliverToCountryCode ?? data.buyer.countryCode ?? null;
+  if (deliverToCountry) {
+    // I2 (Fix-Welle Final-Review): BR-DE-10/BR-DE-11 verlangen PLZ/Ort in
+    // ShipToTradeParty/PostalTradeAddress, sobald BG-15 uebermittelt wird — bislang nur in
+    // der UBL-Delivery ergaenzt (xrechnung.ts), hier fehlte das Gegenstueck (die CII-Datei
+    // war als eigenstaendige XRechnung damit KoSIT-invalid, im EN16931-ZUGFeRD-Profil
+    // folgenlos, weil dort nur die EN-Kernregeln pruefen). Ohne eigene Lieferanschrift
+    // (Ruling) aus der Kaeuferadresse ergaenzt, identisch zu appendAddress/UBL. XSD-
+    // Reihenfolge TradeAddressType: PostcodeCode, ... LineOne, ... CityName, ... CountryID
+    // (siehe appendAddress oben) — LineOne bleibt hier bewusst weg (keine eigene
+    // Lieferstrasse erfasst, s. LIMITATIONEN.md).
+    const shipToAddr = del.ele("ram:ShipToTradeParty").ele("ram:PostalTradeAddress");
+    shipToAddr.ele("ram:PostcodeCode").txt(data.buyer.postalCode).up();
+    shipToAddr.ele("ram:CityName").txt(data.buyer.city).up();
+    shipToAddr.ele("ram:CountryID").txt(deliverToCountry).up();
+    shipToAddr.up().up();
+  }
   if (data.deliveryDate) {
-    del
-      .ele("ram:ActualDeliverySupplyChainEvent")
-      .ele("ram:OccurrenceDateTime")
-      .ele("udt:DateTimeString", { format: "102" })
-      .txt(ciiDate(data.deliveryDate))
-      .up()
-      .up()
-      .up();
+    del.ele("ram:ActualDeliverySupplyChainEvent").ele("ram:OccurrenceDateTime")
+      .ele("udt:DateTimeString", { format: "102" }).txt(ciiDate(data.deliveryDate)).up().up().up();
   }
   del.up();
 
   // Abrechnung
   const set = tx.ele("ram:ApplicableHeaderTradeSettlement");
   set.ele("ram:InvoiceCurrencyCode").txt(cur).up();
-  if (data.iban) {
+  // Zahlungsweg (BT-81 ff.) — Phase 4a: data.paymentMeans, sonst der bisherige
+  // reine IBAN-Fallback (byte-identisch zum bisherigen Verhalten).
+  if (data.paymentMeans) {
+    const pmMeans = data.paymentMeans;
+    const pm = set.ele("ram:SpecifiedTradeSettlementPaymentMeans");
+    pm.ele("ram:TypeCode").txt(pmMeans.code).up();
+    if (pmMeans.iban && ACCOUNT_REQUIRING_CODES.has(pmMeans.code)) {
+      pm.ele("ram:PayeePartyCreditorFinancialAccount").ele("ram:IBANID").txt(pmMeans.iban).up().up();
+    }
+    pm.up();
+  } else if (data.iban) {
     const pm = set.ele("ram:SpecifiedTradeSettlementPaymentMeans");
     pm.ele("ram:TypeCode").txt("58").up();
     pm.ele("ram:PayeePartyCreditorFinancialAccount").ele("ram:IBANID").txt(data.iban).up().up();
@@ -173,23 +267,86 @@ export function buildFacturXCII(data: EInvoiceData): string {
     const t = set.ele("ram:ApplicableTradeTax");
     t.ele("ram:CalculatedAmount").txt(amt(sub.taxCents)).up();
     t.ele("ram:TypeCode").txt("VAT").up();
-    const reason = exemptionReason(sub.taxCategory);
+    const reason = exemptionReasonText(sub.taxCategory);
     if (reason) t.ele("ram:ExemptionReason").txt(reason).up();
     t.ele("ram:BasisAmount").txt(amt(sub.netCents)).up();
     t.ele("ram:CategoryCode").txt(sub.taxCategory).up();
+    // CII-XSD (TradeTaxType): ExemptionReasonCode NACH CategoryCode, VOR RateApplicablePercent.
+    const reasonCode = exemptionReasonCode(sub.taxCategory);
+    if (reasonCode) t.ele("ram:ExemptionReasonCode").txt(reasonCode).up();
     t.ele("ram:RateApplicablePercent").txt(String(sub.taxRate)).up();
     t.up();
   }
-  if (data.paymentTerms) {
-    set.ele("ram:SpecifiedTradePaymentTerms").ele("ram:Description").txt(data.paymentTerms).up().up();
+  // BG-14 (BT-73/BT-74). CII-XSD: nach ApplicableTradeTax, vor SpecifiedTradeAllowanceCharge.
+  if (data.deliveryStart && data.deliveryEnd) {
+    const period = set.ele("ram:BillingSpecifiedPeriod");
+    period.ele("ram:StartDateTime").ele("udt:DateTimeString", { format: "102" }).txt(ciiDate(data.deliveryStart)).up().up();
+    period.ele("ram:EndDateTime").ele("udt:DateTimeString", { format: "102" }).txt(ciiDate(data.deliveryEnd)).up().up();
+    period.up();
   }
+  // BG-20/BG-21 — Beleg-Rabatt/-Aufschlag je Steuersatz-Gruppe, NACH ApplicableTradeTax
+  // und VOR SpecifiedTradePaymentTerms (CII-XSD-Reihenfolge).
+  for (const allowance of data.documentAllowances ?? []) {
+    appendAllowanceCharge(set, {
+      isCharge: false,
+      amountCents: allowance.amountCents,
+      baseCents: allowance.baseCents,
+      reason: allowance.reason,
+      reasonCode: "95",
+      categoryTax: { categoryCode: allowance.taxCategory, taxRate: allowance.taxRate },
+    });
+  }
+  for (const charge of data.documentCharges ?? []) {
+    appendAllowanceCharge(set, {
+      isCharge: true,
+      amountCents: charge.amountCents,
+      baseCents: charge.baseCents,
+      reason: charge.reason,
+      categoryTax: { categoryCode: charge.taxCategory, taxRate: charge.taxRate },
+    });
+  }
+  // BT-20 — Zahlungsbedingungen (Skonto-Syntax siehe mapper.ts).
+  const paymentTermsNote = data.paymentTermsNote ?? data.paymentTerms;
+  if (paymentTermsNote) {
+    set.ele("ram:SpecifiedTradePaymentTerms").ele("ram:Description").txt(paymentTermsNote).up().up();
+  }
+  const lineTotal = data.lineTotalCents ?? data.netTotalCents;
+  const allowanceTotal = data.allowanceTotalCents ?? 0;
+  const chargeTotal = data.chargeTotalCents ?? 0;
   const sum = set.ele("ram:SpecifiedTradeSettlementHeaderMonetarySummation");
-  sum.ele("ram:LineTotalAmount").txt(amt(data.netTotalCents)).up();
+  sum.ele("ram:LineTotalAmount").txt(amt(lineTotal)).up();
+  // Fix-Runde 1 (Befund A): Gutschrift-Buckets sind vorzeichen-gespiegelt (negativ) —
+  // Gate auf !== 0 und Math.abs() statt amt()/isCredit.
+  // XSD-Reihenfolge (CII D16B): ChargeTotalAmount VOR AllowanceTotalAmount (umgekehrt zu UBL).
+  if (chargeTotal !== 0) sum.ele("ram:ChargeTotalAmount").txt(money(Math.abs(chargeTotal))).up();
+  if (allowanceTotal !== 0) sum.ele("ram:AllowanceTotalAmount").txt(money(Math.abs(allowanceTotal))).up();
   sum.ele("ram:TaxBasisTotalAmount").txt(amt(data.netTotalCents)).up();
   sum.ele("ram:TaxTotalAmount", { currencyID: cur }).txt(amt(data.taxTotalCents)).up();
   sum.ele("ram:GrandTotalAmount").txt(amt(data.grossTotalCents)).up();
+  if (data.paidCents) sum.ele("ram:TotalPrepaidAmount").txt(amt(data.paidCents)).up();
   sum.ele("ram:DuePayableAmount").txt(amt(data.payableCents)).up();
   sum.up();
+
+  // BG-3 — Bezug zur Originalrechnung (Gutschrift/Korrektur) bzw. Phase 5: je abgesetzter
+  // Abschlagsrechnung EIN ram:InvoiceReferencedDocument (mehrfach zulaessig). Reihenfolge
+  // laut CII-XSD (HeaderTradeSettlementType): NACH SpecifiedTradeSettlementHeaderMonetary-
+  // Summation, VOR ReceivableSpecifiedTradeAccountingAccount. precedingInvoices hat
+  // Vorrang, wenn gesetzt (nicht leer) — ohne dieses Feld (Alt-/Nicht-FINAL-Belege) bleibt
+  // das Einzelverhalten (precedingInvoiceNumber/-Date) unveraendert.
+  const precedingInvoices = data.precedingInvoices?.length
+    ? data.precedingInvoices
+    : data.precedingInvoiceNumber
+      ? [{ number: data.precedingInvoiceNumber, issueDate: data.precedingInvoiceDate ?? undefined }]
+      : [];
+  for (const preceding of precedingInvoices) {
+    const ref = set.ele("ram:InvoiceReferencedDocument");
+    ref.ele("ram:IssuerAssignedID").txt(preceding.number).up();
+    if (preceding.issueDate) {
+      ref.ele("ram:FormattedIssueDateTime").ele("qdt:DateTimeString", { format: "102" }).txt(ciiDate(preceding.issueDate)).up().up();
+    }
+    ref.up();
+  }
+
   set.up();
   tx.up();
 

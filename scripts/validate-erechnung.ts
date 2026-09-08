@@ -63,15 +63,8 @@ function runSchematron(xsltPath: string, xmlPath: string, label: string): string
   return errors;
 }
 
-async function main(): Promise<void> {
-  mkdirSync(CACHE, { recursive: true });
-
-  let target = process.argv[2];
-  if (!target) {
-    target = path.join(CACHE, "sample-xrechnung.xml");
-    execSync(`npx tsx scripts/generate-sample-xrechnung.ts "${target}"`, { cwd: ROOT, stdio: "inherit" });
-  }
-
+/** Validiert eine einzelne Datei, gibt true bei Bestehen zurück (Ergebnis wird geloggt). */
+async function validateFile(target: string): Promise<boolean> {
   const xml = readFileSync(target, "utf8");
   const isCII = xml.includes("CrossIndustryInvoice");
   const errors: string[] = [];
@@ -98,11 +91,62 @@ async function main(): Promise<void> {
 
   if (errors.length === 0) {
     console.log(`✅ Schematron BESTANDEN (${layers.join(" + ") || "—"}) — ${path.basename(target)}`);
-    process.exit(0);
+    return true;
   }
   console.error(`❌ Schematron: ${errors.length} Verletzung(en) in ${path.basename(target)}:`);
   for (const e of errors) console.error(`   - ${e}`);
-  process.exit(1);
+  return false;
+}
+
+// Fixture-Set: die Bestandsregression ("base", nur UBL) PLUS 19 weitere Beispiele,
+// jeweils als UBL UND CII erzeugt (siehe scripts/generate-sample-xrechnung.ts) — macht
+// 20 Fixtures / 39 geprüfte XML-Dateien insgesamt.
+const SAMPLE_NAMES = [
+  "base",
+  "line-discount",
+  "doc-discount-two-rates",
+  "charge",
+  "skonto-two-terms",
+  "cash",
+  "credit-note-doc-discount", // Fix-Runde 1, Befund A
+  "no-iban", // Fix-Runde 1, Befund B
+  "card-48", // K2: Kartenzahlung faellt auf PaymentMeans-Code 1 zurueck
+  "sepa-59", // K2: SEPA-Lastschrift faellt trotz IBAN auf PaymentMeans-Code 1 zurueck
+  "sections", // Phase 4b (Task 4): Positionsbloecke (HEADING/TEXT/SUBTOTAL) + Artikelnummer/Langtext/Bestellnummer
+  "credit-note-sections", // Fix-Welle (K1): Storno einer Rechnung mit Positionsbloecken
+  "downpayment-386", // Phase 5 (Task 3): Abschlagsrechnung, InvoiceTypeCode 386
+  "partial-percent", // Phase 5 (Task 3): Teilrechnung (PERCENT), InvoiceTypeCode 380
+  "final-two-downpayments", // Phase 5 (Task 3): Schlussrechnung mit zwei abgesetzten Abschlaegen (BT-113/BT-115/BG-3 x2/BT-22)
+  "reverse-charge-ae", // Phase 12b (Task 6): Reverse Charge (§ 13b), Kategorie AE
+  "ig-lieferung-k", // Phase 12b (Task 6): ig. Lieferung (§ 6a), Kategorie K, BG-14 (Leistungszeitraum)
+  "ausfuhr-g", // Phase 12b (Task 6): Ausfuhrlieferung (§ 6), Kategorie G, Drittlandkunde
+  "kleinunternehmer-e", // Phase 12b (Task 6): § 19 UStG, Kategorie E, Aussteller ohne USt-IdNr. (BT-32 statt BT-31)
+  "differenz-e", // Phase 12b (Task 6): § 25a Differenzbesteuerung, Kategorie E (BR-S-05-Fix)
+];
+
+async function main(): Promise<void> {
+  mkdirSync(CACHE, { recursive: true });
+
+  const explicitTarget = process.argv[2];
+  if (explicitTarget) {
+    const ok = await validateFile(explicitTarget);
+    process.exit(ok ? 0 : 1);
+  }
+
+  let allOk = true;
+  for (const sample of SAMPLE_NAMES) {
+    const formats = sample === "base" ? ["ubl"] : ["ubl", "cii"];
+    for (const format of formats) {
+      const target = path.join(CACHE, `sample-${sample}-${format}.xml`);
+      execSync(`npx tsx scripts/generate-sample-xrechnung.ts "${target}" "${sample}" "${format}"`, {
+        cwd: ROOT,
+        stdio: "inherit",
+      });
+      const ok = await validateFile(target);
+      allOk = allOk && ok;
+    }
+  }
+  process.exit(allOk ? 0 : 1);
 }
 
 main().catch((e) => {

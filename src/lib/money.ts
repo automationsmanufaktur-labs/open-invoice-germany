@@ -14,25 +14,21 @@ export function roundHalfUp(value: number): number {
   return value < 0 ? -Math.round(-value) : Math.round(value);
 }
 
-/**
- * Netto-Betrag einer Position in Cent.
- * @param quantityMilli Menge in Milliunits (z.B. 2,5 Stück = 2500)
- * @param unitNetPriceCents Einzelpreis netto in Cent
- * @param discountPermille Rabatt in Promille (0..1000)
- */
-export function computeLineNetCents(
-  quantityMilli: number,
-  unitNetPriceCents: number,
-  discountPermille = 0,
-): number {
-  const gross = (quantityMilli * unitNetPriceCents) / MILLI;
-  const afterDiscount = gross * (1 - discountPermille / MILLI);
-  return roundHalfUp(afterDiscount);
-}
-
 /** Formatiert Cent als lokalisierten Währungs-String (Default de-DE/EUR). */
 export function formatCents(cents: number, currency = "EUR", locale = "de-DE"): string {
   return new Intl.NumberFormat(locale, { style: "currency", currency }).format(cents / CENTS_PER_EURO);
+}
+
+/**
+ * Kompakte Kurzform fuer schmale Achsenbeschriftungen (Fix I5, Abschluss-Review, BarChart-
+ * y-Achse): ab 1.000 € "x,y k€" (eine Nachkommastelle), darunter der volle `formatCents`-
+ * String — eine vierstellige Beschriftung ("1.234,56 €") sprengt sonst die schmale y-Achse.
+ * Vorzeichen bleibt erhalten ("-1,2 k€").
+ */
+export function formatCentsShort(cents: number, locale = "de-DE"): string {
+  if (Math.abs(cents) < CENTS_PER_EURO * 1000) return formatCents(cents);
+  const thousandEuros = cents / (CENTS_PER_EURO * 1000);
+  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 1, minimumFractionDigits: 1 }).format(thousandEuros)} k€`;
 }
 
 /** Parst eine deutsche/englische Geldeingabe ("1.234,56" oder "1234.56") nach Cent. */

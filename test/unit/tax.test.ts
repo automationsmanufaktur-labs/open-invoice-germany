@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { computeTaxBreakdown, defaultCategoryForScheme, ZERO_TAX_SCHEMES } from "@/lib/tax";
+import { computeTaxBreakdown, defaultCategoryForScheme, ZERO_TAX_SCHEMES, EU_COUNTRY_CODES, EU_VAT_PREFIXES } from "@/lib/tax";
+import { SCHEME_NOTICE, SCHEME_NOTICE_ACCEPTED, normalizeNotice } from "@/domain/invoice/mandatory";
 
 describe("tax", () => {
   it("gruppiert nach Satz/Kategorie und rundet pro Gruppe (EN 16931)", () => {
@@ -22,59 +23,34 @@ describe("tax", () => {
   });
 });
 
-describe("defaultCategoryForScheme", () => {
-  it("REGULAR → S (Standard)", () => {
-    expect(defaultCategoryForScheme("REGULAR")).toBe("S");
+describe("Steuerkategorie, Listen und Hinweistexte (Phase 12b)", () => {
+  it("DIFFERENZ ist E (BR-S-05: S verlangt Satz > 0), AUSFUHR ist G, Bestand unveraendert", () => {
+    expect(["REGULAR", "KLEINUNTERNEHMER", "REVERSE_CHARGE", "IG_LIEFERUNG", "IG_LEISTUNG", "DIFFERENZ", "AUSFUHR"].map(defaultCategoryForScheme))
+      .toEqual(["S", "E", "AE", "K", "AE", "E", "G"]);
   });
-
-  it("KLEINUNTERNEHMER → E (steuerbefreit)", () => {
-    expect(defaultCategoryForScheme("KLEINUNTERNEHMER")).toBe("E");
-  });
-
-  it("REVERSE_CHARGE → AE (Reverse Charge)", () => {
-    expect(defaultCategoryForScheme("REVERSE_CHARGE")).toBe("AE");
-  });
-
-  it("IG_LIEFERUNG → K (innergemeinschaftlich)", () => {
-    expect(defaultCategoryForScheme("IG_LIEFERUNG")).toBe("K");
-  });
-
-  it("IG_LEISTUNG → AE (Reverse Charge § 13b)", () => {
-    expect(defaultCategoryForScheme("IG_LEISTUNG")).toBe("AE");
-  });
-
-  it("DRITTLAND_LEISTUNG → O (Out of scope)", () => {
-    expect(defaultCategoryForScheme("DRITTLAND_LEISTUNG")).toBe("O");
-  });
-
-  it("DIFFERENZ → S (Differenzbesteuerung, aber Standard-Satz)", () => {
-    expect(defaultCategoryForScheme("DIFFERENZ")).toBe("S");
-  });
-});
-
-describe("ZERO_TAX_SCHEMES", () => {
-  it("enthält alle befreiten Schemata", () => {
-    expect(ZERO_TAX_SCHEMES.has("KLEINUNTERNEHMER")).toBe(true);
-    expect(ZERO_TAX_SCHEMES.has("REVERSE_CHARGE")).toBe(true);
-    expect(ZERO_TAX_SCHEMES.has("IG_LIEFERUNG")).toBe(true);
-    expect(ZERO_TAX_SCHEMES.has("IG_LEISTUNG")).toBe(true);
-    expect(ZERO_TAX_SCHEMES.has("DRITTLAND_LEISTUNG")).toBe(true);
-  });
-
-  it("REGULAR ist nicht enthalten (19/7/0 wählbar)", () => {
+  it("ZERO_TAX_SCHEMES deckt alle sechs Nullsatz-Schemata ab, nicht REGULAR", () => {
+    for (const s of ["KLEINUNTERNEHMER", "REVERSE_CHARGE", "IG_LIEFERUNG", "IG_LEISTUNG", "DIFFERENZ", "AUSFUHR"]) expect(ZERO_TAX_SCHEMES.has(s)).toBe(true);
     expect(ZERO_TAX_SCHEMES.has("REGULAR")).toBe(false);
   });
-});
-
-describe("computeTaxBreakdown — Drittland-Leistung (Z, 0%)", () => {
-  it("Nullsatz erzeugt keine Steuer", () => {
-    const t = computeTaxBreakdown([
-      { lineNetCents: 100000, taxRate: 0, taxCategory: "Z" },
-    ]);
-    expect(t.netTotalCents).toBe(100000);
-    expect(t.taxTotalCents).toBe(0);
-    expect(t.grossTotalCents).toBe(100000);
-    expect(t.breakdown).toHaveLength(1);
-    expect(t.breakdown[0].taxCategory).toBe("Z");
+  it("EU-Listen: 27 Laender, CH draussen, EL/XI nur als VAT-Praefix", () => {
+    expect([EU_COUNTRY_CODES.size, EU_COUNTRY_CODES.has("GR"), EU_COUNTRY_CODES.has("CH")]).toEqual([27, true, false]);
+    expect([EU_VAT_PREFIXES.has("EL"), EU_VAT_PREFIXES.has("XI"), EU_VAT_PREFIXES.has("GR")]).toEqual([true, true, false]);
+  });
+  it("sechs Schemata tragen einen Text, REGULAR nicht", () => {
+    expect(Object.keys(SCHEME_NOTICE).sort()).toEqual(["AUSFUHR", "DIFFERENZ", "IG_LEISTUNG", "IG_LIEFERUNG", "KLEINUNTERNEHMER", "REVERSE_CHARGE"]);
+    expect(SCHEME_NOTICE.REGULAR).toBeUndefined();
+  });
+  it("normalizeNotice faltet Umlaute, ss und Mehrfach-Whitespace", () => {
+    expect(normalizeNotice("Steuerfreie   Ausfuhrlieferung")).toBe("steuerfreie ausfuhrlieferung");
+    expect(normalizeNotice("Gebrauchtgegenstände/Sonderregelung")).toBe("gebrauchtgegenstaende/sonderregelung");
+    expect(normalizeNotice("gemäß Maß")).toBe("gemaess mass");
+  });
+  it("jeder eigene Text erfuellt sein SCHEME_NOTICE_ACCEPTED; § 25a alle drei Formulierungen (§ 14a Abs. 6)", () => {
+    for (const [scheme, text] of Object.entries(SCHEME_NOTICE)) {
+      expect(SCHEME_NOTICE_ACCEPTED[scheme].some((re) => re.test(normalizeNotice(text)))).toBe(true);
+    }
+    for (const t of ["Gebrauchtgegenstände/Sonderregelung", "Kunstgegenstände/Sonderregelung", "Sammlungsstücke und Antiquitäten/Sonderregelung"]) {
+      expect(SCHEME_NOTICE_ACCEPTED.DIFFERENZ.some((re) => re.test(normalizeNotice(t)))).toBe(true);
+    }
   });
 });

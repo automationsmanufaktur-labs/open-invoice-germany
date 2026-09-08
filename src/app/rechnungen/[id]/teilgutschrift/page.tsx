@@ -1,17 +1,21 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
+import { getActiveOrg } from "@/lib/org";
+import { loadDocumentSettings } from "@/domain/document/settings";
 import { PartialCreditForm } from "@/components/PartialCreditForm";
 
 export const dynamic = "force-dynamic";
 
 export default async function TeilgutschriftPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const inv = await prisma.invoice.findUnique({
-    where: { id },
+  const org = await getActiveOrg();
+  const inv = await prisma.invoice.findFirst({
+    where: { id, orgId: org.id },
     include: { lines: { orderBy: { position: "asc" } } },
   });
   if (!inv) notFound();
+  const { taxRates } = await loadDocumentSettings(org.id);
 
   if (inv.status === "DRAFT") {
     return (
@@ -21,13 +25,17 @@ export default async function TeilgutschriftPage({ params }: { params: Promise<{
     );
   }
 
-  const initialLines = inv.lines.map((l) => ({
-    description: l.description,
-    quantity: String(l.quantityMilli / 1000),
-    unit: l.unit,
-    price: (Math.abs(l.unitNetPriceCents) / 100).toFixed(2),
-    taxRate: l.taxRate,
-  }));
+  // Teilgutschrift nur ueber ITEM-Positionen — HEADING/TEXT/SUBTOTAL tragen keinen Betrag
+  // und werden hier nicht angeboten (§8, K1).
+  const initialLines = inv.lines
+    .filter((l) => l.lineType === "ITEM")
+    .map((l) => ({
+      description: l.description,
+      quantity: String(l.quantityMilli / 1000),
+      unit: l.unit,
+      price: (Math.abs(l.unitNetPriceCents) / 100).toFixed(2),
+      taxRate: l.taxRate,
+    }));
 
   return (
     <div className="space-y-6">
@@ -37,7 +45,7 @@ export default async function TeilgutschriftPage({ params }: { params: Promise<{
         </Link>
         <h1 className="text-2xl font-bold tracking-tight">Teilgutschrift</h1>
       </div>
-      <PartialCreditForm invoiceId={id} initialLines={initialLines} />
+      <PartialCreditForm invoiceId={id} initialLines={initialLines} taxRates={taxRates} />
     </div>
   );
 }

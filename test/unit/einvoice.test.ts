@@ -3,6 +3,7 @@ import { buildXRechnungUBL } from "@/lib/einvoice/xrechnung";
 import { validateXRechnung } from "@/lib/einvoice/en16931-core";
 import { buildFacturXCII } from "@/lib/einvoice/cii";
 import { renderZugferdPdf } from "@/lib/einvoice/zugferd";
+import { testPdfTheme } from "../helpers/pdf-theme";
 import type { EInvoiceData } from "@/lib/einvoice/types";
 
 const data: EInvoiceData = {
@@ -83,6 +84,19 @@ describe("XRechnung / EN 16931", () => {
     expect(validateXRechnung(ku, xml).errors).toEqual([]);
   });
 
+  it("erkennt einen Beleg nur mit HEADING-Zeile als Verletzung von BR-16 (keine ITEM-Position)", () => {
+    // Commit 0 (Task-4-Review): BR-16 muss die ITEM-Zeilen zaehlen, nicht data.lines.length —
+    // eine reine Gliederungszeile (HEADING, §8) darf nicht als "Rechnungsposition" durchgehen.
+    const headingOnly: EInvoiceData = {
+      ...data,
+      lines: [{ id: "1", description: "Ueberschrift", quantityMilli: 0, unit: "C62", unitNetPriceCents: 0, lineNetCents: 0, taxRate: 0, taxCategory: "S", lineType: "HEADING" }],
+    };
+    const xml = buildXRechnungUBL(headingOnly);
+    const result = validateXRechnung(headingOnly, xml);
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/BR-16/);
+  });
+
   it("erkennt Verkäufer ohne jegliche Steuer-ID (BR-CO-26)", () => {
     const bad: EInvoiceData = { ...data, seller: { ...data.seller, vatId: null, taxNumber: null } };
     const result = validateXRechnung(bad, buildXRechnungUBL(bad));
@@ -134,8 +148,46 @@ describe("ZUGFeRD / Factur-X (CII)", () => {
   });
 
   it("bettet die factur-x.xml in ein gültiges PDF ein", async () => {
-    const pdf = await renderZugferdPdf(data);
+    const pdf = await renderZugferdPdf(data, testPdfTheme());
     expect(pdf.subarray(0, 5).toString("latin1")).toBe("%PDF-");
     expect(pdf.toString("latin1")).toContain("factur-x.xml");
+  });
+});
+
+describe("BG-14 / BT-80 (Phase 12b)", () => {
+  const period = { deliveryStart: new Date("2026-05-01"), deliveryEnd: new Date("2026-05-31") };
+  it("UBL: InvoicePeriod nur mit Zeitraum, nach BuyerReference und vor den Parteien", () => {
+    const xml = buildXRechnungUBL({ ...data, ...period });
+    expect(xml).toContain("<cbc:StartDate>2026-05-01</cbc:StartDate>");
+    expect(xml).toContain("<cbc:EndDate>2026-05-31</cbc:EndDate>");
+    expect(xml.indexOf("<cbc:BuyerReference>")).toBeLessThan(xml.indexOf("<cac:InvoicePeriod>"));
+    expect(xml.indexOf("<cac:InvoicePeriod>")).toBeLessThan(xml.indexOf("<cac:AccountingSupplierParty>"));
+    expect(buildXRechnungUBL(data)).not.toContain("<cac:InvoicePeriod>");
+  });
+  it("UBL: BT-80 aus dem Kaeuferland, nach ActualDeliveryDate; ueberschreibbar", () => {
+    const xml = buildXRechnungUBL(data);
+    // Hinweis (Abweichung vom Brief): root.end({ prettyPrint: true }) fuegt zwischen Country
+    // und seinem einzigen Kindelement stets Zeilenumbruch/Einrueckung ein — \s* toleriert das,
+    // die Verschachtelung (DeliveryLocation > ... > Country > IdentificationCode = DE) bleibt geprueft.
+    expect(xml).toMatch(/<cac:DeliveryLocation>[\s\S]*<cac:Country>\s*<cbc:IdentificationCode>DE<\/cbc:IdentificationCode>\s*<\/cac:Country>/);
+    expect(xml.indexOf("<cbc:ActualDeliveryDate>")).toBeLessThan(xml.indexOf("<cac:DeliveryLocation>"));
+    expect(buildXRechnungUBL({ ...data, deliverToCountryCode: "AT" }))
+      .toMatch(/<cac:DeliveryLocation>[\s\S]*<cbc:IdentificationCode>AT<\/cbc:IdentificationCode>/);
+  });
+  it("CII: ShipToTradeParty vor ActualDeliverySupplyChainEvent, BillingSpecifiedPeriod an der richtigen Stelle", () => {
+    const xml = buildFacturXCII({ ...data, ...period });
+    expect(xml.indexOf("<ram:ShipToTradeParty>")).toBeLessThan(xml.indexOf("<ram:ActualDeliverySupplyChainEvent>"));
+    expect(xml).toMatch(/<ram:ShipToTradeParty>[\s\S]*<ram:CountryID>DE<\/ram:CountryID>/);
+    expect(xml.indexOf("<ram:ApplicableTradeTax>")).toBeLessThan(xml.indexOf("<ram:BillingSpecifiedPeriod>"));
+    expect(xml.indexOf("<ram:BillingSpecifiedPeriod>")).toBeLessThan(xml.indexOf("<ram:SpecifiedTradePaymentTerms>"));
+  });
+});
+
+describe("§ 14b-Aufbewahrungshinweis (Phase 12b, Task 5)", () => {
+  it("§ 14b-Hinweis erscheint als eigener Note in UBL und CII, sonst nicht", () => {
+    const hint = "Sie sind verpflichtet, diese Rechnung zwei Jahre aufzubewahren (§ 14b Abs. 1 Satz 5 UStG).";
+    expect(buildXRechnungUBL({ ...data, consumerRetentionHint: true })).toContain(hint);
+    expect(buildFacturXCII({ ...data, consumerRetentionHint: true })).toContain(hint);
+    expect(buildXRechnungUBL(data)).not.toContain("§ 14b Abs. 1 Satz 5");
   });
 });

@@ -4,6 +4,7 @@ import { createRecurringSchema } from "@/schemas";
 import { createRecurring, RecurringError } from "@/domain/recurring/create";
 import { getActiveOrg } from "@/lib/org";
 import { dbInternal } from "@/lib/db";
+import { TaxRateNotAllowedError } from "@/domain/settings/tax-rates";
 
 export const runtime = "nodejs";
 
@@ -17,6 +18,9 @@ export async function POST(req: Request) {
     if (e instanceof z.ZodError) {
       return NextResponse.json({ error: "Validierung fehlgeschlagen", issues: e.issues }, { status: 400 });
     }
+    // Fix-Welle 12c (I2): sonst unter den generischen 400-Zweig gefallen — derselbe
+    // Konflikt liefert am /api/v1-Zwilling bereits 409 (src/api/errors.ts).
+    if (e instanceof TaxRateNotAllowedError) return NextResponse.json({ error: e.message }, { status: 409 });
     if (e instanceof RecurringError) return NextResponse.json({ error: e.message }, { status: 422 });
     console.error("POST /api/recurring:", e);
     return NextResponse.json({ error: "Abo konnte nicht angelegt werden." }, { status: 400 });

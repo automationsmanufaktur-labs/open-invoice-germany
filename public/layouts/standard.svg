@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 170">
+  <title>Standard</title>
+  <rect x="0.5" y="0.5" width="119" height="169" fill="#ffffff" stroke="#e5e7eb"/>
+  <!-- Logo oben rechts -->
+  <rect x="88" y="8" width="24" height="10" rx="1" fill="#d1d5db"/>
+  <!-- Adressblock links (4 Zeilen) -->
+  <g fill="#9ca3af">
+    <rect x="8" y="30" width="36" height="2"/>
+    <rect x="8" y="35" width="30" height="2"/>
+    <rect x="8" y="40" width="32" height="2"/>
+    <rect x="8" y="45" width="24" height="2"/>
+  </g>
+  <!-- Infoblock rechts (4 Zeilen) -->
+  <g fill="#9ca3af">
+    <rect x="72" y="30" width="40" height="2"/>
+    <rect x="72" y="35" width="34" height="2"/>
+    <rect x="72" y="40" width="38" height="2"/>
+    <rect x="72" y="45" width="28" height="2"/>
+  </g>
+  <!-- Titel -->
+  <rect x="60" y="55" width="52" height="4" fill="#1f2937"/>
+  <!-- Tabellenkopf (dunkler Balken) -->
+  <rect x="8" y="70" width="104" height="8" fill="#1f2937"/>
+  <!-- 6 Positionszeilen -->
+  <g fill="#d1d5db">
+    <rect x="8" y="82" width="60" height="2"/>
+    <rect x="92" y="82" width="20" height="2"/>
+    <rect x="8" y="90" width="55" height="2"/>
+    <rect x="92" y="90" width="20" height="2"/>
+    <rect x="8" y="98" width="62" height="2"/>
+    <rect x="92" y="98" width="20" height="2"/>
+    <rect x="8" y="106" width="50" height="2"/>
+    <rect x="92" y="106" width="20" height="2"/>
+    <rect x="8" y="114" width="58" height="2"/>
+    <rect x="92" y="114" width="20" height="2"/>
+    <rect x="8" y="122" width="52" height="2"/>
+    <rect x="92" y="122" width="20" height="2"/>
+  </g>
+  <!-- Summen rechts -->
+  <rect x="76" y="134" width="36" height="2" fill="#9ca3af"/>
+  <rect x="76" y="139" width="36" height="2.5" fill="#1f2937"/>
+  <!-- Fusszeile: drei Spalten -->
+  <g fill="#9ca3af">
+    <rect x="8" y="154" width="28" height="1.5"/>
+    <rect x="8" y="158" width="24" height="1.5"/>
+    <rect x="8" y="162" width="26" height="1.5"/>
+    <rect x="46" y="154" width="28" height="1.5"/>
+    <rect x="46" y="158" width="24" height="1.5"/>
+    <rect x="84" y="154" width="28" height="1.5"/>
+    <rect x="84" y="158" width="24" height="1.5"/>
+  </g>
+</svg>

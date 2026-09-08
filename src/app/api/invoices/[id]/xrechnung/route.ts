@@ -1,6 +1,7 @@
 import { loadEInvoiceData } from "@/lib/einvoice/load";
 import { buildXRechnungUBL } from "@/lib/einvoice/xrechnung";
 import { validateXRechnung } from "@/lib/einvoice/en16931-core";
+import { onEInvoiceInvalid } from "@/domain/notifications/hooks";
 
 export const runtime = "nodejs";
 
@@ -21,6 +22,10 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     return Response.json(report);
   }
   if (!report.valid) {
+    // Task 4 (Facts): auch am manuellen Export-Pfad benachrichtigen, nicht nur beim
+    // Versand (email/attachments.ts, Task 3) — blockiert den Export NICHT zusaetzlich
+    // (er ist bereits durch den 422 blockiert), nur die Benachrichtigung.
+    await onEInvoiceInvalid(loaded.invoice.orgId, { invoiceId: loaded.invoice.id, errors: report.errors });
     return Response.json({ error: "EN-16931-Kernvalidierung fehlgeschlagen", issues: report.errors }, { status: 422 });
   }
 

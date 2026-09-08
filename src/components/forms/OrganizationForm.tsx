@@ -7,6 +7,7 @@ import { TextField, SelectField, CheckboxField, SubmitButton, ErrorBanner } from
 
 export interface OrgFormData {
   legalName: string;
+  ownerName: string | null;
   addressLine1: string;
   addressLine2: string | null;
   postalCode: string;
@@ -37,6 +38,7 @@ export function OrganizationForm({ org }: { org?: OrgFormData | null }) {
         <h2 className="font-semibold text-slate-900">Unternehmen</h2>
         <div className="grid gap-4 sm:grid-cols-2">
           <TextField label="Firmenname" name="legalName" defaultValue={org?.legalName} required className="sm:col-span-2" />
+          <TextField label="Inhaber/-in" name="ownerName" defaultValue={org?.ownerName} hint="Erscheint in der automatischen Fußzeile (optional)." />
           <TextField label="Straße & Nr." name="addressLine1" defaultValue={org?.addressLine1} required />
           <TextField label="Adresszusatz" name="addressLine2" defaultValue={org?.addressLine2} />
           <TextField label="PLZ" name="postalCode" defaultValue={org?.postalCode} required />

@@ -1,241 +1,249 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
-import { formatCents, formatQuantity } from "@/lib/money";
+import { getActiveOrg } from "@/lib/org";
+import { formatCents } from "@/lib/money";
 import { StatusBadge } from "@/components/StatusBadge";
-import { finalizeAction, cancelAction } from "@/app/actions/invoices";
-import { PaymentForm } from "@/components/PaymentForm";
-import { DunningButton } from "@/components/DunningButton";
-import { DUNNING_LEVEL_TITLE } from "@/lib/dunning";
+import { finalizeAction } from "@/app/actions/invoices";
+import { listPaymentMethods } from "@/domain/payment-method/manage";
+import { dunningScheduleFor, latestDunning } from "@/domain/dunning/schedule";
+import { loadDunningSettings } from "@/domain/dunning/settings";
+import { SendEmailDialog } from "@/components/SendEmailDialog";
+import { EmailHistory } from "@/components/EmailHistory";
+import { DocumentChain } from "@/components/DocumentChain";
+import { AttachmentPanel } from "@/components/AttachmentPanel";
+import { listAttachments } from "@/domain/attachment/manage";
+import { LineItemsTable } from "@/components/LineItemsTable";
+import { DocumentTimeline } from "@/components/DocumentTimeline";
+import { DocumentDetailLayout } from "@/components/detail/DocumentDetailLayout";
+import { DetailNav } from "@/components/detail/DetailNav";
+import { PdfStack } from "@/components/detail/PdfStack";
+import { CollapsibleSection } from "@/components/detail/CollapsibleSection";
+import { InternalNotesBox } from "@/components/detail/InternalNotesBox";
+import { loadNeighbors } from "@/domain/document/neighbors";
+import { buildInvoiceViewModel, TYPE_TITLE } from "./_parts/invoice-view-model";
+import { InvoiceStatusCard } from "./_parts/InvoiceStatusCard";
+import { InvoiceMoreMenu } from "./_parts/InvoiceMoreMenu";
+import { InvoiceTotals } from "./_parts/InvoiceTotals";
+import { CorrectionSection } from "./_parts/CorrectionSection";
 
 export const dynamic = "force-dynamic";
-
-const TYPE_TITLE: Record<string, string> = {
-  INVOICE: "Rechnung",
-  CREDIT_NOTE: "Gutschrift / Storno",
-  CORRECTION: "Korrekturrechnung",
-};
-
-function deDate(d: Date | null) {
-  return d ? new Intl.DateTimeFormat("de-DE").format(d) : "—";
-}
 
 export default async function InvoiceDetail({
   params,
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; liste?: string | string[] }>;
 }) {
   const { id } = await params;
-  const { error } = await searchParams;
+  const { error, liste: listeParam } = await searchParams;
+  const liste = firstOf(listeParam);
 
-  const invoice = await prisma.invoice.findUnique({
-    where: { id },
+  const org = await getActiveOrg();
+  // G7 (Fix-Runde 2): findUnique(id) ohne orgId erlaubte fremden Organisationen den Zugriff
+  // auf eine Rechnungsseite ueber die reine ID — jetzt mandantengeprueft.
+  const invoice = await prisma.invoice.findFirst({
+    where: { id, orgId: org.id },
     include: {
       lines: { orderBy: { position: "asc" } },
-      customer: true,
+      customer: { include: { defaultPaymentMethod: true } },
       org: true,
-      payments: true,
-      dunnings: { orderBy: { level: "asc" } },
+      payments: { orderBy: { paidAt: "asc" } },
+      dunnings: { orderBy: { level: "asc" }, include: { stage: { select: { order: true, name: true } } } },
+      paymentMethod: true,
+      // Task 4: Abzugs-Snapshot einer Schlussrechnung (Task 2, FinalInvoiceDeduction) —
+      // NIE live aus den Abschlagsrechnungen, nur dieser unveraenderliche Snapshot.
+      finalDeductions: { orderBy: { issueDate: "asc" } },
     },
   });
   if (!invoice) notFound();
 
-  const isDraft = invoice.status === "DRAFT";
-  const isCancelled = invoice.status === "CANCELLED";
-  const breakdown = JSON.parse(invoice.taxBreakdownJson) as Array<{ taxRate: number; netCents: number; taxCents: number }>;
-  const isInvoiceType = invoice.type === "INVOICE" || invoice.type === "CORRECTION";
-  const openCents = invoice.grossTotalCents - invoice.paidAmountCents;
-  const dueDate = invoice.dueDate ?? invoice.issueDate;
-  const isOverdue = !isDraft && !isCancelled && openCents > 0 && new Date() > dueDate;
-  const canPay = !isDraft && !isCancelled && isInvoiceType && openCents > 0;
+  const vm = buildInvoiceViewModel(invoice);
+
+  // Task 4: Bezug zur Quelle (Angebot/AB bzw. Lieferschein) bei PARTIAL/DOWNPAYMENT/FINAL.
+  let sourceLabel: { href: string; text: string } | null = null;
+  if (invoice.sourceType === "QUOTE" && invoice.sourceId) {
+    const src = await prisma.quote.findFirst({ where: { id: invoice.sourceId, orgId: org.id }, select: { number: true, kind: true } });
+    if (src) {
+      const kindLabel = src.kind === "AUFTRAGSBESTAETIGUNG" ? "Auftragsbestätigung" : src.kind === "PROFORMA" ? "Proforma-Rechnung" : "Angebot";
+      sourceLabel = { href: `/dokumente/${invoice.sourceId}`, text: `${kindLabel} ${src.number ?? ""}`.trim() };
+    }
+  } else if (invoice.sourceType === "DELIVERY_NOTE" && invoice.sourceId) {
+    const src = await prisma.deliveryNote.findFirst({ where: { id: invoice.sourceId, orgId: org.id }, select: { number: true } });
+    if (src) sourceLabel = { href: `/lieferscheine/${invoice.sourceId}`, text: `Lieferschein ${src.number ?? ""}`.trim() };
+  }
+
+  // Task 4: Mahnblock — naechste Stufe/Faelligkeit ueber dieselbe reine Zeitplan-Logik
+  // wie createDunning (dunningScheduleFor), damit die Anzeige exakt dem entspricht, was
+  // die naechste Erstellung tatsaechlich anwenden wuerde.
+  let dunningSchedule: { nextStage: { name: string; order: number } | null; dueAt: Date | null; isDue: boolean } | null = null;
+  if (vm.openCents > 0 && !vm.isDraft && !vm.isCancelled) {
+    const dunningStages = await prisma.dunningStage.findMany({ where: { orgId: org.id }, select: { order: true, enabled: true, daysAfterDue: true, name: true } });
+    const dunningSettings = await loadDunningSettings(org.id);
+    // Nit (Fix-Welle): `latestDunning` statt "letztes Element nach orderBy level asc" —
+    // nach einem Umsortieren der Mahnstufen (S3) ist `level`/`stage.order` nicht mehr
+    // zuverlaessig die zeitliche Reihenfolge; einheitlich mit create.ts/auto.ts.
+    const lastDunning = latestDunning(invoice.dunnings);
+    const schedule = dunningScheduleFor({
+      invoiceDueDate: vm.dueDate,
+      lastDunning: lastDunning ? { order: lastDunning.stage?.order ?? lastDunning.level, dueDate: lastDunning.dueDate, sentAt: lastDunning.sentAt } : null,
+      stages: dunningStages,
+      gracePeriodDays: dunningSettings.gracePeriodDays,
+      now: new Date(),
+    });
+    dunningSchedule = { nextStage: schedule.nextStage ? { name: schedule.nextStage.name, order: schedule.nextStage.order } : null, dueAt: schedule.dueAt, isDue: schedule.isDue };
+  }
+
+  // Zahlungsmethoden-Auswahl im Zahlungsformular: aktive Methoden OHNE den Systemcode
+  // SKONTO (der wird ausschliesslich automatisch bei detectSkonto gebucht, nie manuell
+  // ausgewaehlt). Default-Kette: Kunden-Standard -> Methode der Rechnung -> TRANSFER.
+  const activePaymentMethods = vm.canPay
+    ? (await listPaymentMethods(org.id)).filter((m) => m.isActive && m.code !== "SKONTO")
+    : [];
+  const defaultPaymentMethodCode = invoice.customer.defaultPaymentMethod?.code ?? invoice.paymentMethod?.code ?? "TRANSFER";
+  const attachments = await listAttachments(org.id, "INVOICE", invoice.id);
+
+  const { prevId, nextId, backQuery } = await loadNeighbors("INVOICE", org.id, id, liste);
+  const navHref = (targetId: string) => `/rechnungen/${targetId}${liste ? `?liste=${encodeURIComponent(liste)}` : ""}`;
+
+  const title = `${TYPE_TITLE[invoice.type] ?? "Beleg"} ${invoice.number ?? "(Entwurf)"}`;
+  const showPaymentBlock = vm.isInvoiceType && !vm.isDraft && !vm.isCancelled;
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <Link href="/rechnungen" className="text-sm text-slate-500 hover:text-slate-800">
-            ← Rechnungen
-          </Link>
-          <h1 className="text-2xl font-bold tracking-tight">
-            {TYPE_TITLE[invoice.type] ?? "Beleg"} {invoice.number ?? "(Entwurf)"}
-          </h1>
+    <DocumentDetailLayout
+      nav={
+        <DetailNav
+          backHref={`/rechnungen${backQuery ? `?${backQuery}` : ""}`}
+          backLabel="Rechnungen"
+          prevHref={prevId ? navHref(prevId) : null}
+          nextHref={nextId ? navHref(nextId) : null}
+        />
+      }
+      title={title}
+      badges={
+        <>
           <StatusBadge status={invoice.status} />
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <a
-            href={`/api/invoices/${invoice.id}/pdf`}
-            target="_blank"
-            className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-          >
-            PDF
-          </a>
-          {!isDraft && (
-            <a
-              href={`/api/invoices/${invoice.id}/xrechnung`}
-              target="_blank"
-              className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-            >
-              XRechnung (XML)
-            </a>
-          )}
-          {!isDraft && (
-            <a
-              href={`/api/invoices/${invoice.id}/zugferd`}
-              target="_blank"
-              className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-            >
-              ZUGFeRD (PDF)
-            </a>
-          )}
-          {isDraft && (
-            <form action={finalizeAction}>
-              <input type="hidden" name="id" value={invoice.id} />
-              <button className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700">
-                Festschreiben
-              </button>
-            </form>
-          )}
-          {!isDraft && !isCancelled && invoice.type === "INVOICE" && (
-            <Link
-              href={`/rechnungen/${invoice.id}/teilgutschrift`}
-              className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-            >
-              Teilgutschrift
+          {sourceLabel && (
+            <Link href={sourceLabel.href} className="text-sm text-indigo-600 hover:underline">
+              zu {sourceLabel.text}
             </Link>
           )}
-          {!isDraft && !isCancelled && invoice.type === "INVOICE" && (
-            <form action={cancelAction}>
+          {invoice.snapshotSource === "MIGRATION" && (
+            <span className="inline-block rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+              Adressstand per Migration eingefroren
+            </span>
+          )}
+        </>
+      }
+      actions={
+        <>
+          {/* I1 (Fix-Welle): PDF-Knopf wie auf Dokument-/Lieferscheinseite — rendert auch Entwuerfe. */}
+          <a href={`/api/invoices/${invoice.id}/pdf`} target="_blank" className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">
+            PDF
+          </a>
+          <SendEmailDialog docType={vm.emailDocType} docId={invoice.id} label={vm.isDraft ? "Entwurf per E-Mail senden" : "Per E-Mail senden"} />
+          {vm.isDraft && (
+            <Link href={`/rechnungen/${invoice.id}/bearbeiten`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">
+              Bearbeiten
+            </Link>
+          )}
+          {vm.isDraft && (
+            <form action={finalizeAction}>
               <input type="hidden" name="id" value={invoice.id} />
-              <button className="rounded-md border border-rose-300 bg-white px-3 py-1.5 text-sm font-medium text-rose-700 hover:bg-rose-50">
-                Stornieren
-              </button>
+              <button className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700">Festschreiben</button>
             </form>
           )}
-        </div>
-      </div>
-
-      {error && (
-        <div className="rounded-md border border-rose-200 bg-rose-50 p-4 text-sm whitespace-pre-line text-rose-800">{error}</div>
-      )}
-      {isDraft && (
-        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-          Entwurf — noch keine Rechnungsnummer vergeben. Mit „Festschreiben“ wird die Rechnung GoBD-konform unveränderbar.
-        </div>
-      )}
-
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div className="rounded-lg border border-slate-200 bg-white p-5 text-sm">
-          <h2 className="mb-2 font-semibold text-slate-900">Empfänger</h2>
-          <p className="text-slate-700">{invoice.customer.name}</p>
-          <p className="text-slate-600">{invoice.customer.addressLine1}</p>
-          <p className="text-slate-600">
-            {invoice.customer.postalCode} {invoice.customer.city}
-          </p>
-          {invoice.customer.vatId && <p className="text-slate-500">USt-IdNr.: {invoice.customer.vatId}</p>}
-        </div>
-        <div className="rounded-lg border border-slate-200 bg-white p-5 text-sm">
-          <h2 className="mb-2 font-semibold text-slate-900">Eckdaten</h2>
-          <dl className="grid grid-cols-2 gap-y-1 text-slate-600">
-            <dt>Rechnungsdatum</dt>
-            <dd className="text-right">{deDate(invoice.issueDate)}</dd>
-            <dt>Leistungsdatum</dt>
-            <dd className="text-right">{deDate(invoice.deliveryDate)}</dd>
-            <dt>Fällig</dt>
-            <dd className="text-right">{deDate(invoice.dueDate)}</dd>
-            <dt>Steuerschema</dt>
-            <dd className="text-right">{invoice.taxScheme}</dd>
-          </dl>
-        </div>
-      </div>
-
-      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
-            <tr>
-              <th className="px-4 py-2">Beschreibung</th>
-              <th className="px-4 py-2 text-right">Menge</th>
-              <th className="px-4 py-2 text-right">Einzel</th>
-              <th className="px-4 py-2 text-right">USt</th>
-              <th className="px-4 py-2 text-right">Netto</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {invoice.lines.map((l) => (
-              <tr key={l.id}>
-                <td className="px-4 py-2 text-slate-700">{l.description}</td>
-                <td className="tabular px-4 py-2 text-right">
-                  {formatQuantity(l.quantityMilli)} {l.unit}
-                </td>
-                <td className="tabular px-4 py-2 text-right">{formatCents(l.unitNetPriceCents, invoice.currency)}</td>
-                <td className="tabular px-4 py-2 text-right">{l.taxRate}%</td>
-                <td className="tabular px-4 py-2 text-right">{formatCents(l.lineNetCents, invoice.currency)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="ml-auto max-w-xs space-y-1 text-sm">
-        <div className="flex justify-between">
-          <span className="text-slate-600">Netto</span>
-          <span className="tabular font-medium">{formatCents(invoice.netTotalCents, invoice.currency)}</span>
-        </div>
-        {breakdown
-          .filter((b) => b.taxCents > 0)
-          .map((b) => (
-            <div key={b.taxRate} className="flex justify-between text-slate-600">
-              <span>zzgl. {b.taxRate}% USt</span>
-              <span className="tabular">{formatCents(b.taxCents, invoice.currency)}</span>
-            </div>
-          ))}
-        <div className="flex justify-between border-t border-slate-200 pt-1 text-base font-semibold">
-          <span>Gesamt</span>
-          <span className="tabular">{formatCents(invoice.grossTotalCents, invoice.currency)}</span>
-        </div>
-      </div>
-
-      {invoice.notes && <p className="text-sm text-slate-600">{invoice.notes}</p>}
-
-      {isInvoiceType && !isDraft && !isCancelled && (
-        <section className="space-y-4 rounded-lg border border-slate-200 bg-white p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="font-semibold text-slate-900">Zahlung & Mahnwesen</h2>
-            <span className="text-sm text-slate-600">
-              Bezahlt: {formatCents(invoice.paidAmountCents, invoice.currency)} · Offen:{" "}
-              <strong>{formatCents(openCents, invoice.currency)}</strong>
-              {isOverdue && <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800">überfällig</span>}
-            </span>
-          </div>
-
-          {canPay && <PaymentForm invoiceId={invoice.id} openCents={openCents} />}
-
-          {openCents > 0 && (
-            <div className="flex flex-wrap items-center gap-3">
-              <DunningButton invoiceId={invoice.id} />
-              {!isOverdue && <span className="text-xs text-slate-400">Fällig am {deDate(dueDate)}</span>}
+          {!vm.isDraft && vm.canPay && (
+            <a href="#zahlung" className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700">
+              Zahlung erfassen
+            </a>
+          )}
+        </>
+      }
+      more={
+        <InvoiceMoreMenu
+          invoiceId={invoice.id}
+          isDraft={vm.isDraft}
+          isCancelled={vm.isCancelled}
+          isInvoiceType={vm.isInvoiceType}
+          canCancelOrCredit={vm.canCancelOrCredit}
+          canDuplicate={vm.canDuplicate}
+        />
+      }
+      notice={
+        <>
+          {error && <div className="rounded-md border border-rose-200 bg-rose-50 p-4 text-sm whitespace-pre-line text-rose-800">{error}</div>}
+          {vm.isDraft && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              Entwurf — noch keine Rechnungsnummer vergeben. Mit „Festschreiben“ wird die Rechnung GoBD-konform unveränderbar.
             </div>
           )}
+        </>
+      }
+      pdf={<PdfStack src={`/api/invoices/${invoice.id}/pdf`} title={`${title} — PDF`} />}
+      aside={
+        <InvoiceStatusCard
+          invoice={invoice}
+          openCents={vm.openCents}
+          dueDate={vm.dueDate}
+          isOverdue={vm.isOverdue}
+          paymentMethodName={vm.paymentMethodName}
+          hasSkonto={vm.hasSkonto}
+          showPaymentBlock={showPaymentBlock}
+          canPay={vm.canPay}
+          paymentMethods={activePaymentMethods.map((m) => ({ code: m.code, name: m.name }))}
+          defaultPaymentMethod={defaultPaymentMethodCode}
+          dunningSchedule={dunningSchedule}
+        >
+          <AttachmentPanel
+            docType="INVOICE"
+            docId={invoice.id}
+            initial={attachments.map((a) => ({ id: a.id, filename: a.filename, mime: a.mime, sizeBytes: a.sizeBytes }))}
+          />
+          <DocumentChain orgId={org.id} type="INVOICE" id={invoice.id} />
+        </InvoiceStatusCard>
+      }
+    >
+      <InternalNotesBox notes={invoice.internalNotes} />
 
-          {invoice.dunnings.length > 0 && (
-            <div className="space-y-1 text-sm">
-              {invoice.dunnings.map((d) => (
-                <div key={d.id} className="flex items-center justify-between border-t border-slate-100 pt-1 text-slate-600">
-                  <span>
-                    {DUNNING_LEVEL_TITLE[d.level] ?? `${d.level}. Mahnung`} · {d.number} · {deDate(d.sentAt)}
-                    {d.interestAmountCents > 0 ? ` · Zinsen ${formatCents(d.interestAmountCents, invoice.currency)}` : ""}
-                    {d.flatFee40Cents > 0 ? ` · Pauschale ${formatCents(d.flatFee40Cents, invoice.currency)}` : ""}
-                  </span>
-                  <a href={`/api/dunnings/${d.id}/pdf`} target="_blank" className="text-indigo-600 hover:underline">
-                    PDF
-                  </a>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
+      <CollapsibleSection title="Positionen" summary={`${invoice.lines.length} ${invoice.lines.length === 1 ? "Position" : "Positionen"} · Netto ${formatCents(invoice.netTotalCents, invoice.currency)}`}>
+        <div className="space-y-4">
+          {invoice.headerText && <p className="whitespace-pre-line text-sm text-slate-700">{invoice.headerText}</p>}
+          <LineItemsTable lines={invoice.lines} currency={invoice.currency} />
+          <InvoiceTotals
+            currency={invoice.currency}
+            type={invoice.type}
+            hasDocumentAdjustment={vm.hasDocumentAdjustment}
+            documentDiscountTotalCents={vm.documentDiscountTotalCents}
+            documentChargeTotalCents={vm.documentChargeTotalCents}
+            documentChargeReason={invoice.documentChargeReason}
+            netTotalCents={invoice.netTotalCents}
+            breakdown={vm.breakdown}
+            grossTotalCents={invoice.grossTotalCents}
+            payableBase={vm.payableBase}
+            deductionsByInvoice={vm.deductionsByInvoice}
+          />
+          {invoice.footerText && <p className="whitespace-pre-line text-sm text-slate-700">{invoice.footerText}</p>}
+          {invoice.notes && <p className="text-sm text-slate-600">{invoice.notes}</p>}
+        </div>
+      </CollapsibleSection>
+
+      {!vm.isDraft && !vm.isCancelled && (
+        <CorrectionSection invoiceId={invoice.id} type={invoice.type} canCancelOrCredit={vm.canCancelOrCredit} canDuplicate={vm.canDuplicate} />
       )}
-    </div>
+
+      <EmailHistory docType={vm.emailDocType} docId={invoice.id} />
+
+      <section className="space-y-3">
+        <h2 className="font-semibold text-slate-900">Zeitstrahl</h2>
+        <DocumentTimeline kind="INVOICE" docId={invoice.id} />
+      </section>
+    </DocumentDetailLayout>
   );
+}
+
+// M11 (Fix-Welle): `?liste=a&liste=b` liefert `string[]` — Ableitung wie auf den Listenseiten.
+function firstOf(v: string | string[] | undefined): string | undefined {
+  return Array.isArray(v) ? v[0] : v;
 }

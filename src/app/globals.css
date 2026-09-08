@@ -11,3 +11,26 @@ body {
 .tabular {
   font-variant-numeric: tabular-nums;
 }
+
+/*
+ * Phase 12a — native <dialog> wieder zentrieren. Das Tailwind-v4-Preflight
+ * (node_modules/tailwindcss/preflight.css, Z. 7-16) setzt `margin: 0` auf
+ * `*, ::after, ::before, ::backdrop, ::file-selector-button` und ueberschreibt damit
+ * die UA-Regel `dialog { margin: auto }` — jeder showModal()-Dialog klebte oben links.
+ * `dialog:modal` (0,1,1) schlaegt den Universalselektor (0,0,0).
+ *
+ * Fix-Welle 12a (C1): die Regel MUSS in `@layer base` liegen. `@import "tailwindcss"`
+ * legt alle Utilities (u. a. `max-w-*`) in `@layer utilities` ab; eine Regel ausserhalb
+ * jeder Cascade Layer zaehlt als implizite letzte Layer und schlaegt jede Layer-
+ * Deklaration unabhaengig von der Spezifitaet — die `max-w-*`-Utilities der neun
+ * Dialoge waeren sonst wirkungslos. In `@layer base` bleibt `dialog:modal` (0,1,1)
+ * weiterhin gegen `*` (0,0,0) aus dem Preflight (selbe Layer) wirksam, waehrend
+ * `max-w-*` aus `@layer utilities` wieder gewinnt.
+ */
+@layer base {
+  dialog:modal {
+    margin: auto;
+    max-height: calc(100dvh - 2rem);
+    max-width: calc(100vw - 2rem);
+  }
+}

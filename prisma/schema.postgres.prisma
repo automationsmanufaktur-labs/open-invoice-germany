@@ -18,24 +18,25 @@ datasource db {
 
 /// Ausstellender Unternehmer (Mandant). Tenancy-Diskriminator orgId auf allen Belegtabellen.
 model Organization {
-  id                String  @id @default(cuid())
+  id                String   @id @default(cuid())
   legalName         String
   addressLine1      String
   addressLine2      String?
   postalCode        String
   city              String
-  country           String  @default("DE")
+  country           String   @default("DE")
   email             String?
   phone             String?
   website           String?
   taxNumber         String? // Steuernummer (§14 Abs.4 Nr.2)
   vatId             String? // USt-IdNr. (§14 Abs.4 Nr.2)
   kuIdNr            String? // §19a Kleinunternehmer-IdNr.
-  smallBusiness     Boolean @default(false) // §19 UStG
-  defaultTaxScheme  String  @default("REGULAR") // REGULAR | KLEINUNTERNEHMER | DIFFERENZ
+  smallBusiness     Boolean  @default(false) // §19 UStG
+  defaultTaxScheme  String   @default("REGULAR") // REGULAR | KLEINUNTERNEHMER | DIFFERENZ | REVERSE_CHARGE | IG_LIEFERUNG | IG_LEISTUNG | AUSFUHR
   iban              String?
   bic               String?
   bankName          String?
+  ownerName         String? // Phase 11b — Inhaber/-in fuer die automatische Fusszeile
   logoPath          String?
   electronicAddress String? // Peppol-Adresse des Ausstellers
   createdAt         DateTime @default(now())
@@ -45,75 +46,148 @@ model Organization {
   products     Product[]
   quotes       Quote[]
   invoices     Invoice[]
+  recurring    RecurringInvoice[]
   numberRanges NumberRange[]
   changeLogs   ChangeLog[]
-  recurring    RecurringInvoice[]
+
+  documentRelations      DocumentRelation[]
+  deliveryNotes          DeliveryNote[]
+  textTemplates          TextTemplate[]
+  emailTemplates         EmailTemplate[]
+  emailLogs              EmailLog[]
+  customerAddresses      CustomerAddress[]
+  contactPersons         ContactPerson[]
+  paymentMethods         PaymentMethod[]
+  dunningStages          DunningStage[]
+  dunningSettings        DunningSettings?
+  mailSettings           MailSettings?
+  documentSettings       DocumentSettings?
+  documentAttachments    DocumentAttachment[]
+  brandingSettings       BrandingSettings?
+  printSettings          PrintSettings?
+  customFieldDefinitions CustomFieldDefinition[]
 }
 
 /// Kunde / Leistungsempfänger.
 model Customer {
-  id                      String    @id @default(cuid())
+  id                      String       @id @default(cuid())
   orgId                   String
   org                     Organization @relation(fields: [orgId], references: [id])
-  type                    String    @default("BUSINESS") // BUSINESS | CONSUMER
+  type                    String       @default("BUSINESS") // BUSINESS | CONSUMER
   name                    String
   contactName             String?
   addressLine1            String
   addressLine2            String?
   postalCode              String
   city                    String
-  countryCode             String    @default("DE")
+  countryCode             String       @default("DE")
   email                   String?
   phone                   String?
   vatId                   String?
   vatIdValidatedAt        DateTime? // §18e / VIES qualifizierte Bestätigung
-  leitwegId               String?   // B2G, BT-10
+  leitwegId               String? // B2G, BT-10
   peppolId                String?
-  defaultPaymentTermsDays Int       @default(14)
+  // S1 (Fix-Welle Phase 7): NULL = kein Kunden-Override (kaskadiert auf Zahlungsmethode ->
+  // DocumentSettings.invoiceDueDays -> 14 Tage, siehe invoice/create.ts). War vorher
+  // `Int @default(14)` — dadurch hatte JEDER Kunde immer einen Wert und die Zahlungsmethode
+  // wurde nie erreicht ("Setting a 30-day term on a customer has zero effect").
+  defaultPaymentTermsDays Int?
   notes                   String?
-  isArchived              Boolean   @default(false) // Soft-Delete; kein Hard-Delete bei Belegbezug (DSGVO vs. §147 AO)
-  createdAt               DateTime  @default(now())
-  updatedAt               DateTime  @updatedAt
+  isArchived              Boolean      @default(false) // Soft-Delete; kein Hard-Delete bei Belegbezug (DSGVO vs. §147 AO)
+  customerNumber          String? // Phase 7, Task 1 (§34) — Nummernkreis CUSTOMER, formatiert wie Belegnummern
+  createdAt               DateTime     @default(now())
+  updatedAt               DateTime     @updatedAt
 
-  quotes   Quote[]
-  invoices Invoice[]
+  quotes    Quote[]
+  invoices  Invoice[]
   recurring RecurringInvoice[]
 
+  addresses              CustomerAddress[]
+  contacts               ContactPerson[]
+  deliveryNotes          DeliveryNote[]
+  defaultPaymentMethodId String?
+  defaultPaymentMethod   PaymentMethod?    @relation(fields: [defaultPaymentMethodId], references: [id])
+
+  // Phase 8a, Task 1 (§28/§31) — Kundenspezifische Vorgaben; NULL = kein Override,
+  // Prioritaetskette (explizite Eingabe > Kunde > Zahlungsmethode > DocumentSettings >
+  // Systemdefault) greift wie bei defaultPaymentTermsDays. Reiner Stammdaten-Zustand,
+  // wirkt nie rueckwirkend auf bestehende Belege (Snapshots).
+  defaultCurrency         String? // 3 Grossbuchstaben, z.B. EUR — sonst Beleg-Default
+  defaultDiscountPermille Int     @default(0) // 0..1000 (=0..100%), Vorschlag fuer neue Belege
+  invoiceEmail            String? // Rechnungsversand-Empfaenger, falls abweichend von email
+  invoiceCc               String? // kommagetrennte CC-Adressen fuer Rechnungsversand
+  quoteEmail              String? // Angebotsversand-Empfaenger, falls abweichend von email
+  eInvoicePreferred       Boolean @default(false) // Kunde bevorzugt XRechnung/ZUGFeRD
+  orderReference          String? // Vorbelegung Bestellnummer (BT-13), siehe Invoice.orderNumber
+  deliveryTermsText       String? // Vorschlag fuer Invoice/Quote.deliveryTerms
+  paymentTermsText        String? // Vorschlag fuer Invoice/Quote.paymentTerms (Freitext, zusaetzlich zu defaultPaymentTermsDays)
+  language                String  @default("de") // ISO-639-1, Kleinbuchstaben
+  customFieldsJson        String? // Werte je CustomFieldDefinition.key, via Zod geparst (customFieldValuesSchema)
+
+  @@index([orgId])
+  @@index([orgId, customerNumber])
+}
+
+/// Frei definierbare Kundenzusatzfelder je Organisation (§31). Werte liegen in
+/// Customer.customFieldsJson; das Loeschen einer Definition entfernt bestehende Werte
+/// NICHT (bleiben als verwaiste Keys im JSON, siehe deleteCustomFieldDefinition).
+model CustomFieldDefinition {
+  id          String       @id @default(cuid())
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id])
+  key         String // ^[a-z][a-z0-9_]{1,39}$, Objektschluessel in customFieldsJson
+  label       String
+  type        String // TEXT | NUMBER | DATE | BOOLEAN | SELECT
+  optionsJson String? // nur bei type SELECT: JSON-Array der zulaessigen Werte
+  required    Boolean      @default(false)
+  sortOrder   Int          @default(0)
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@unique([orgId, key])
   @@index([orgId])
 }
 
 /// Produkt/Leistung im Katalog (kein Beleg, frei editierbar).
 model Product {
-  id            String  @id @default(cuid())
+  id            String       @id @default(cuid())
   orgId         String
   org           Organization @relation(fields: [orgId], references: [id])
   name          String
   description   String?
-  unit          String  @default("C62") // UN/ECE Rec 20: C62=Stück, HUR=Stunde, KGM=kg, MTR=m …
+  articleNumber String? // frei vergebene Artikelnummer, Snapshot in Positionen (Phase 4b)
+  unit          String       @default("C62") // UN/ECE Rec 20: C62=Stück, HUR=Stunde, KGM=kg, MTR=m …
   netPriceCents Int
-  taxRate       Int     @default(19)    // 19 | 7 | 0
-  taxCategory   String  @default("S")   // UNTDID 5305: S | AE | K | G | E | Z
-  differential  Boolean @default(false) // §25a Differenzbesteuerung
-  isArchived    Boolean @default(false)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  taxRate       Int          @default(19) // 19 | 7 | 0
+  taxCategory   String       @default("S") // UNTDID 5305: S | AE | K | G | E | Z
+  differential  Boolean      @default(false) // §25a Differenzbesteuerung
+  isArchived    Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
 
   @@index([orgId])
+  @@index([orgId, articleNumber])
 }
 
 /// Nummernkreis — transaktionaler Zähler. Nummern werden NUR bei Festschreibung vergeben.
 model NumberRange {
-  id           String   @id @default(cuid())
+  id           String       @id @default(cuid())
   orgId        String
   org          Organization @relation(fields: [orgId], references: [id])
-  docType      String   // QUOTE | INVOICE | CREDIT_NOTE | DUNNING
-  prefix       String   @default("")
-  pattern      String   @default("{PREFIX}{YYYY}-{SEQ}") // Platzhalter {PREFIX}{YYYY}{MM}{SEQ}
-  seqPadding   Int      @default(4)
-  year         Int      @default(0) // 0 = jahresunabhängig
-  currentValue Int      @default(0)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  docType      String // QUOTE | INVOICE | CREDIT_NOTE | DUNNING
+  prefix       String       @default("")
+  pattern      String       @default("{PREFIX}{YYYY}-{SEQ}") // Platzhalter {PREFIX}{YYYY}{MM}{SEQ}
+  seqPadding   Int          @default(4)
+  year         Int          @default(0) // 0 = jahresunabhängig
+  currentValue Int          @default(0)
+  // Fix-Welle Phase 7 (B3): welche Zeile (year 0 vs. year <Jahr>) je docType tatsaechlich
+  // vergibt. updateNumberRange() setzt beim Umschalten die Zielzeile aktiv und die andere
+  // Modus-Zeile inaktiv; loadActiveRange() liest anhand dieser Spalte (nicht mehr
+  // "zuletzt aktualisiert").
+  isActive     Boolean      @default(true)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
   @@unique([orgId, docType, year])
   @@index([orgId])
@@ -122,44 +196,79 @@ model NumberRange {
 /// Geschäftsdokument ohne Beleg-Charakter (Angebot/Auftragsbestätigung/Proforma).
 /// KEIN GoBD-Beleg, frei editier-/löschbar. Tax-Belege sind ausschließlich Invoice.
 model Quote {
-  id                   String   @id @default(cuid())
-  orgId                String
-  org                  Organization @relation(fields: [orgId], references: [id])
-  customerId           String
-  customer             Customer @relation(fields: [customerId], references: [id])
-  kind                 String   @default("ANGEBOT") // ANGEBOT | AUFTRAGSBESTAETIGUNG | PROFORMA
-  number               String?
-  status               String   @default("DRAFT") // DRAFT | SENT | ACCEPTED | DECLINED | EXPIRED | CONVERTED
-  issueDate            DateTime @default(now())
-  validUntil           DateTime?
-  currency             String   @default("EUR")
-  taxScheme            String   @default("REGULAR")
-  notes                String?
-  netTotalCents        Int      @default(0)
-  taxTotalCents        Int      @default(0)
-  grossTotalCents      Int      @default(0)
-  convertedToInvoiceId String?
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  id                       String           @id @default(cuid())
+  orgId                    String
+  org                      Organization     @relation(fields: [orgId], references: [id])
+  customerId               String
+  customer                 Customer         @relation(fields: [customerId], references: [id])
+  kind                     String           @default("ANGEBOT") // ANGEBOT | AUFTRAGSBESTAETIGUNG | PROFORMA
+  number                   String?
+  status                   String           @default("DRAFT") // DRAFT | SENT | ACCEPTED | REJECTED | EXPIRED | CANCELLED
+  issueDate                DateTime         @default(now())
+  validUntil               DateTime?
+  currency                 String           @default("EUR")
+  taxScheme                String           @default("REGULAR")
+  subject                  String? // Betreffzeile
+  notes                    String?
+  internalNotes            String? // Nur intern sichtbar — nie in PDF oder Mails
+  headerText               String?
+  footerText               String?
+  deliveryTerms            String?
+  paymentTerms             String?
+  customerReference        String? // Kundenreferenz/Bestellnummer des Kunden
+  printOptionsJson         String? // Phase 7, Task 1 (§36) — Ueberschreibung der globalen PrintSettings (printOptionsOverrideSchema), nur bei status DRAFT aenderbar
+  contactPersonId          String?
+  contactPerson            ContactPerson?   @relation(fields: [contactPersonId], references: [id], onDelete: SetNull)
+  billingAddressId         String?
+  billingAddress           CustomerAddress? @relation(fields: [billingAddressId], references: [id], onDelete: SetNull)
+  // Beleg-Rabatt/-Aufschlag (Phase 4a) — Promille 0..1000, Cents Festbetrag; proportional
+  // je Steuersatz-Bucket verteilt (src/lib/pricing/allocate.ts).
+  documentDiscountPermille Int              @default(0)
+  documentDiscountCents    Int              @default(0)
+  documentChargePermille   Int              @default(0)
+  documentChargeCents      Int              @default(0)
+  documentChargeReason     String?
+  sellerSnapshotJson       String? // Snapshot zum Erstellungszeitpunkt (Phase 0), siehe Invoice
+  buyerSnapshotJson        String?
+  contactSnapshotJson      String? // Snapshot des gewaehlten Ansprechpartners (Phase 8a, §30)
+  snapshotSource           String? // CREATE | SENT | MIGRATION
+  snapshotAt               DateTime?
+  netTotalCents            Int              @default(0)
+  taxTotalCents            Int              @default(0)
+  grossTotalCents          Int              @default(0)
+  convertedToInvoiceId     String?
+  sentAt                   DateTime?
+  decidedAt                DateTime? // Zeitpunkt von ACCEPTED/DECLINED
+  decisionNote             String?
+  archivedAt               DateTime?
+  createdAt                DateTime         @default(now())
+  updatedAt                DateTime         @updatedAt
 
-  lines QuoteLine[]
+  lines      QuoteLine[]
+  shareLinks QuoteShareLink[]
 
   @@index([orgId])
   @@index([customerId])
+  @@index([contactPersonId])
+  @@index([billingAddressId])
 }
 
 model QuoteLine {
-  id                String @id @default(cuid())
+  id                String  @id @default(cuid())
   quoteId           String
-  quote             Quote  @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  quote             Quote   @relation(fields: [quoteId], references: [id], onDelete: Cascade)
   position          Int
+  lineType          String  @default("ITEM") // ITEM | HEADING | TEXT | SUBTOTAL (Phase 4b, §8: kein Menge-0-Workaround)
   description       String
-  quantityMilli     Int    // 1/1000 Einheit
-  unit              String @default("C62")
+  descriptionLong   String? // Rich-Text-Langbeschreibung (Markdown-Teilmenge, Phase 4b)
+  articleNumber     String? // Artikelnummer-Snapshot zum Erfassungszeitpunkt
+  quantityMilli     Int // 1/1000 Einheit
+  unit              String  @default("C62")
   unitNetPriceCents Int
   taxRate           Int
-  taxCategory       String @default("S")
-  discountPermille  Int    @default(0) // 0..1000 (= 0..100 %)
+  taxCategory       String  @default("S")
+  discountPermille  Int     @default(0) // 0..1000 (= 0..100 %)
+  discountCents     Int     @default(0) // zusaetzlicher Festbetragsrabatt (Cent)
   lineNetCents      Int
 
   @@index([quoteId])
@@ -167,48 +276,141 @@ model QuoteLine {
 
 /// Rechnung — GoBD-relevanter Beleg. Nach Festschreibung append-only.
 model Invoice {
-  id                    String   @id @default(cuid())
-  orgId                 String
-  org                   Organization @relation(fields: [orgId], references: [id])
-  customerId            String
-  customer              Customer @relation(fields: [customerId], references: [id])
-  number                String?  @unique // NULL bis Festschreibung
-  status                String   @default("DRAFT") // DRAFT | FINALIZED | SENT | PAID | PARTIALLY_PAID | CANCELLED
-  type                  String   @default("INVOICE") // INVOICE | CREDIT_NOTE | CORRECTION
-  taxScheme             String   @default("REGULAR") // REGULAR | KLEINUNTERNEHMER | DIFFERENZ | REVERSE_CHARGE | IG_LIEFERUNG | IG_LEISTUNG
-  currency              String   @default("EUR")
-  issueDate             DateTime @default(now())
-  deliveryDate          DateTime?
-  deliveryStart         DateTime?
-  deliveryEnd           DateTime?
-  dueDate               DateTime?
-  buyerReference        String?  // BT-10 / Leitweg-ID (B2G)
-  notes                 String?
-  paymentTerms          String?  // Skonto-/Zahlungsbedingungen (Freitext, §14 Abs.4 Nr.7)
-  netTotalCents         Int      @default(0)
-  taxTotalCents         Int      @default(0)
-  grossTotalCents       Int      @default(0)
-  paidAmountCents       Int      @default(0)
-  taxBreakdownJson      String   @default("[]") // [{taxCategory,taxRate,netCents,taxCents}]
-  consumerRetentionHint Boolean  @default(false) // §14 Abs.4 Nr.9 / §14b Abs.1 S.5
-  reversedByInvoiceId   String?  // Storno-Verknüpfung
-  correctsInvoiceId     String?  // Korrekturrechnung-Verknüpfung (§31 Abs.5 UStDV)
-  xmlFormat             String?  // XRECHNUNG | ZUGFERD
-  xmlHash               String?
-  pdfPath               String?
-  finalizedAt           DateTime?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  id                        String            @id @default(cuid())
+  orgId                     String
+  org                       Organization      @relation(fields: [orgId], references: [id])
+  customerId                String
+  customer                  Customer          @relation(fields: [customerId], references: [id])
+  number                    String?           @unique // NULL bis Festschreibung
+  status                    String            @default("DRAFT") // DRAFT | FINALIZED | SENT | PAID | PARTIALLY_PAID | CANCELLED
+  type                      String            @default("INVOICE") // INVOICE | CREDIT_NOTE | CORRECTION
+  taxScheme                 String            @default("REGULAR") // REGULAR | KLEINUNTERNEHMER | DIFFERENZ | REVERSE_CHARGE | IG_LIEFERUNG | IG_LEISTUNG | AUSFUHR
+  currency                  String            @default("EUR")
+  issueDate                 DateTime          @default(now())
+  deliveryDate              DateTime?
+  deliveryStart             DateTime?
+  deliveryEnd               DateTime?
+  dueDate                   DateTime?
+  buyerReference            String? // BT-10 / Leitweg-ID (B2G)
+  subject                   String? // Betreffzeile (Phase 4b, analog Quote.subject)
+  orderNumber               String? // Bestellnummer des Kunden, zusaetzlich zu buyerReference
+  internalReference         String? // interne Referenz/Kostenstelle, nur intern
+  contactPersonId           String?
+  contactPerson             ContactPerson?    @relation(fields: [contactPersonId], references: [id], onDelete: SetNull)
+  billingAddressId          String?
+  billingAddress            CustomerAddress?  @relation("InvoiceBillingAddress", fields: [billingAddressId], references: [id], onDelete: SetNull)
+  shippingAddressId         String?
+  shippingAddress           CustomerAddress?  @relation("InvoiceShippingAddress", fields: [shippingAddressId], references: [id], onDelete: SetNull)
+  notes                     String?
+  paymentTerms              String? // Skonto-/Zahlungsbedingungen (Freitext, §14 Abs.4 Nr.7)
+  internalNotes             String? // Nur intern sichtbar — nie in PDF, XRechnung, ZUGFeRD oder Mails
+  headerText                String?
+  footerText                String?
+  printOptionsJson          String? // Phase 7, Task 1 (§36) — Ueberschreibung der globalen PrintSettings (printOptionsOverrideSchema); Invoice-Guard (db.ts) erlaubt Aenderung nur bei status DRAFT
+  // Beleg-Rabatt/-Aufschlag (Phase 4a) — Promille 0..1000, Cents Festbetrag; proportional
+  // je Steuersatz-Bucket verteilt (src/lib/pricing/allocate.ts).
+  documentDiscountPermille  Int               @default(0)
+  documentDiscountCents     Int               @default(0)
+  documentChargePermille    Int               @default(0)
+  documentChargeCents       Int               @default(0)
+  documentChargeReason      String?
+  // Skonto-Konditionen (Phase 4a) — bis zu zwei Stufen (src/lib/pricing/skonto.ts).
+  skonto1Permille           Int?
+  skonto1Days               Int?
+  skonto2Permille           Int?
+  skonto2Days               Int?
+  paymentMethodId           String?
+  paymentMethod             PaymentMethod?    @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
+  // Snapshot der gewaehlten Zahlungsmethode zum Festschreibungszeitpunkt (Phase 4a),
+  // { code, name, invoiceText, untdidCode, bankIban, bankBic, bankName }. NULL, wenn
+  // keine Zahlungsmethode gewaehlt war.
+  paymentMethodSnapshotJson String?
+  // Snapshot der Parteien zum Festschreibungszeitpunkt (Phase 0). JSON-String, per Zod
+  // gelesen (sellerSnapshotSchema/buyerSnapshotSchema). NULL bei Entwuerfen.
+  sellerSnapshotJson        String?
+  buyerSnapshotJson         String?
+  contactSnapshotJson       String? // Snapshot des gewaehlten Ansprechpartners (Phase 8a, §30)
+  snapshotSource            String? // FINALIZE | CREATE | MIGRATION
+  snapshotAt                DateTime?
+  netTotalCents             Int               @default(0)
+  taxTotalCents             Int               @default(0)
+  grossTotalCents           Int               @default(0)
+  paidAmountCents           Int               @default(0)
+  taxBreakdownJson          String            @default("[]") // [{taxCategory,taxRate,netCents,taxCents}]
+  consumerRetentionHint     Boolean           @default(false) // §14 Abs.4 Nr.9 / §14b Abs.1 S.5
+  reversedByInvoiceId       String? // Storno-Verknüpfung
+  correctsInvoiceId         String? // Korrekturrechnung-Verknüpfung (§31 Abs.5 UStDV)
+  recurringInvoiceId        String? // Herkunft: aus Abo/Dauerrechnung erzeugt
+  recurringInvoice          RecurringInvoice? @relation(fields: [recurringInvoiceId], references: [id])
+  // Phase 5 (§13-15 UStG): Quelle bei type PARTIAL/DOWNPAYMENT/FINAL — QUOTE oder
+  // DELIVERY_NOTE (Teilrechnung) bzw. QUOTE (Abschlag/Schluss). NULL bei INVOICE/
+  // CREDIT_NOTE/CORRECTION. Die Relation selbst (PARTIAL_OF/DOWNPAYMENT_OF/FINAL_FOR)
+  // laeuft weiterhin ueber DocumentRelation (linkDocuments) — diese Felder sind ein
+  // denormalisierter Schnellzugriff fuer Abfragen/UI, keine zweite Quelle der Wahrheit.
+  sourceType                String?
+  sourceId                  String?
+  // Anteil in Promille bei PERCENT-Teil-/Abschlagsrechnung (Snapshot zum Zeitpunkt der
+  // Anlage). NULL bei Festbetrags-/Positions-/Mengen-Teilrechnungen und bei FINAL.
+  partialPermille           Int?
+  // Summe der bereits vereinnahmten Abschlaege (brutto) — nur bei type FINAL gesetzt;
+  // Snapshot aus den FinalInvoiceDeduction-Zeilen zum Festschreibungszeitpunkt.
+  prepaidCents              Int               @default(0)
+  // Offener Betrag der Rechnung (brutto). NULL = grossTotalCents (Normalfall INVOICE/
+  // PARTIAL/DOWNPAYMENT); bei FINAL = grossTotalCents - prepaidCents. Zahlungen/
+  // Mahnwesen rechnen mit COALESCE(payableCents, grossTotalCents).
+  payableCents              Int?
+  xmlFormat                 String? // XRECHNUNG | ZUGFERD
+  xmlHash                   String?
+  pdfPath                   String?
+  finalizedAt               DateTime?
+  // Mahnprozess-Status (Phase 6): ACTIVE = laeuft normal weiter, PAUSED = bis
+  // dunningPausedUntil ausgesetzt (z.B. Ratenzahlung vereinbart), STOPPED = dauerhaft
+  // angehalten (z.B. Inkasso uebergeben). Wirkt nur auf Neuerstellung/-versand, bereits
+  // erstellte Mahnungen bleiben unveraendert (GoBD).
+  dunningState              String            @default("ACTIVE")
+  dunningPausedUntil        DateTime?
+  dunningStateNote          String?
+  createdAt                 DateTime          @default(now())
+  updatedAt                 DateTime          @updatedAt
 
-  lines    InvoiceLine[]
-  payments Payment[]
-  dunnings Dunning[]
-  recurringInvoiceId    String?
-  recurringInvoice      RecurringInvoice? @relation(fields: [recurringInvoiceId], references: [id])
+  lines               InvoiceLine[]
+  payments            Payment[]
+  dunnings            Dunning[]
+  finalDeductions     FinalInvoiceDeduction[] @relation("FinalInvoiceDeductions")
+  downpaymentOfFinals FinalInvoiceDeduction[] @relation("DownpaymentInvoiceDeductions")
 
   @@index([orgId])
   @@index([customerId])
   @@index([recurringInvoiceId])
+  @@index([paymentMethodId])
+  @@index([contactPersonId])
+  @@index([billingAddressId])
+  @@index([shippingAddressId])
+}
+
+// Phase 5 (§14 Abs. 5 Satz 2 UStG): Snapshot einer auf einer Schlussrechnung
+// abgesetzten Abschlagsrechnung, je Steuersatz/-kategorie. Wird beim Festschreiben
+// der Schlussrechnung erzeugt und danach nie mehr veraendert (GoBD) — Storno der
+// Schlussrechnung stornoiert die Rechnung selbst, nicht diese Zeilen.
+model FinalInvoiceDeduction {
+  id                   String   @id @default(cuid())
+  finalInvoiceId       String
+  finalInvoice         Invoice  @relation("FinalInvoiceDeductions", fields: [finalInvoiceId], references: [id], onDelete: Cascade)
+  downpaymentInvoiceId String
+  downpaymentInvoice   Invoice  @relation("DownpaymentInvoiceDeductions", fields: [downpaymentInvoiceId], references: [id])
+  // Snapshot der Abschlagsrechnung zum Zeitpunkt der Schlussrechnung (BG-3 Preceding
+  // invoice reference: BT-25 Nummer, BT-26 Datum).
+  number               String
+  issueDate            DateTime
+  netCents             Int
+  taxCents             Int
+  grossCents           Int
+  taxRate              Int
+  taxCategory          String
+  createdAt            DateTime @default(now())
+
+  @@unique([finalInvoiceId, downpaymentInvoiceId, taxRate, taxCategory])
+  @@index([finalInvoiceId])
 }
 
 model InvoiceLine {
@@ -216,50 +418,468 @@ model InvoiceLine {
   invoiceId         String
   invoice           Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   position          Int
+  lineType          String  @default("ITEM") // ITEM | HEADING | TEXT | SUBTOTAL (Phase 4b, §8: kein Menge-0-Workaround)
   productId         String? // nur Snapshot-Referenz, kein Live-Lookup
   description       String
+  descriptionLong   String? // Rich-Text-Langbeschreibung (Markdown-Teilmenge, Phase 4b)
+  articleNumber     String? // Artikelnummer-Snapshot zum Erfassungszeitpunkt
   quantityMilli     Int
   unit              String  @default("C62")
   unitNetPriceCents Int
   taxRate           Int
   taxCategory       String  @default("S")
   discountPermille  Int     @default(0)
+  discountCents     Int     @default(0) // zusaetzlicher Festbetragsrabatt (Cent)
   lineNetCents      Int
+  // Phase 5 (Paragraph 13-15 UStG): Quellposition bei einer Teilrechnung (type PARTIAL,
+  // mode POSITIONS/QUANTITIES) -- Id der QuoteLine/DeliveryNoteLine, gegen die
+  // billedQuantities() die bereits abgerechnete Menge prueft. NULL bei allen anderen
+  // Zeilen (Festbetrags-/Prozent-Teil-/Abschlagsrechnung, normale Rechnung).
+  sourceLineId      String?
 
   @@index([invoiceId])
 }
 
 model Payment {
-  id          String   @id @default(cuid())
-  invoiceId   String
-  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  amountCents Int
-  paidAt      DateTime @default(now())
-  method      String   @default("TRANSFER") // TRANSFER | CASH | CARD | SEPA
-  reference   String?
-  isSkonto    Boolean  @default(false) // §17-Fall: keine Rechnungsberichtigung nötig
-  createdAt   DateTime @default(now())
+  id                 String   @id @default(cuid())
+  invoiceId          String
+  invoice            Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amountCents        Int
+  paidAt             DateTime @default(now())
+  method             String   @default("TRANSFER") // TRANSFER | CASH | CARD | SEPA
+  reference          String?
+  isSkonto           Boolean  @default(false) // §17-Fall: keine Rechnungsberichtigung nötig
+  // Bei isSkonto=true: die Zahlung, deren Skontoabzug hierdurch verbucht wird.
+  skontoForPaymentId String?
+  note               String? // Phase 8b (§42): freie Notiz zur Zahlung
+  createdAt          DateTime @default(now())
 
   @@index([invoiceId])
 }
 
 model Dunning {
-  id                       String   @id @default(cuid())
+  id                       String    @id @default(cuid())
   invoiceId                String
-  invoice                  Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoice                  Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   number                   String?
-  level                    Int      // 0 = Zahlungserinnerung, 1, 2
-  sentAt                   DateTime @default(now())
+  level                    Int // 0 = Zahlungserinnerung, 1, 2
+  sentAt                   DateTime  @default(now())
   dueDate                  DateTime?
-  baseInterestRatePermille Int?     // Basiszinssatz-Snapshot (‰ zum Verzugsstichtag)
-  interestRatePoints       Int?     // 5 (B2C) oder 9 (B2B) Prozentpunkte über Basiszins
-  interestAmountCents      Int      @default(0)
-  lateFeeCents             Int      @default(0) // nur konkrete Kosten, KEINE Pauschale
-  flatFee40Cents           Int      @default(0) // §288 Abs.5, nur B2B
+  baseInterestRatePermille Int? // Basiszinssatz-Snapshot (‰ zum Verzugsstichtag)
+  interestRatePoints       Int? // 5 (B2C) oder 9 (B2B) Prozentpunkte über Basiszins
+  interestAmountCents      Int       @default(0)
+  lateFeeCents             Int       @default(0) // nur konkrete Kosten, KEINE Pauschale
+  flatFee40Cents           Int       @default(0) // §288 Abs.5, nur B2B
   pdfPath                  String?
-  createdAt                DateTime @default(now())
+  createdAt                DateTime  @default(now())
+  // Snapshots der Parteien zum Erstellungszeitpunkt (Phase 6, analog Invoice/Quote).
+  // NULL bei Altmahnungen vor Phase 6 — Selbstheilung per ensureDunningSnapshots
+  // (Herkunft MIGRATION), PDF faellt bis dahin auf Live-Berechnung zurueck (Task 2).
+  sellerSnapshotJson       String?
+  buyerSnapshotJson        String?
+  snapshotSource           String? // CREATE | MIGRATION
+  claimBaseCents           Int       @default(0) // Forderungsbasis zum Erstellungszeitpunkt; 0 bei Altmahnungen (nicht rekonstruierbar)
+  feeCents                 Int       @default(0) // Mahnkosten der Stufe (Snapshot von DunningStage.feeCents); lateFeeCents bleibt fuer konkrete Zusatzkosten
+  invoiceNumber            String? // Snapshot der Rechnungsnummer zum Erstellungszeitpunkt
+  invoiceDueDate           DateTime? // Snapshot der Rechnungsfaelligkeit zum Erstellungszeitpunkt
+  createdBy                String    @default("user") // user | scheduler | mcp | api
 
+  stageId String?
+  stage   DunningStage? @relation(fields: [stageId], references: [id])
+
+  @@unique([invoiceId, stageId])
   @@index([invoiceId])
+}
+
+/// Wiederkehrende Rechnung / Abo — Vorlage, aus der nach Plan reguläre Rechnungs-
+/// ENTWÜRFE erzeugt werden. Selbst KEIN Beleg (frei editierbar). Die erzeugten
+/// Invoices durchlaufen Festschreibung/Nummernkreis/Hash-Chain wie jede Rechnung.
+model RecurringInvoice {
+  id               String       @id @default(cuid())
+  orgId            String
+  org              Organization @relation(fields: [orgId], references: [id])
+  customerId       String
+  customer         Customer     @relation(fields: [customerId], references: [id])
+  title            String // interne Bezeichnung, z. B. "Wartungsvertrag Mustermann"
+  status           String       @default("ACTIVE") // ACTIVE | PAUSED | ENDED
+  interval         String       @default("MONTHLY") // DAY | WEEKLY | MONTHLY | QUARTERLY | YEARLY
+  intervalCount    Int          @default(1) // alle N Intervalle (z. B. 2 = alle 2 Monate)
+  anchorDay        Int? // fixer Tag im Monat (1..28) für MONTHLY/QUARTERLY/YEARLY
+  startDate        DateTime
+  nextRunDate      DateTime // Stichtag der nächsten Erzeugung
+  endDate          DateTime?
+  // Phase 8b (§43): harte Obergrenze der Laeufe — nach issuedCount >= maxRuns (nach dem
+  // jeweiligen Lauf) wechselt das Abo auf ENDED, zusaetzlich/alternativ zu endDate.
+  maxRuns          Int?
+  taxScheme        String       @default("REGULAR")
+  currency         String       @default("EUR")
+  paymentTermsDays Int          @default(14)
+  notes            String?
+  autoFinalize     Boolean      @default(false) // true = erzeugte Rechnung sofort festschreiben
+  autoSend         Boolean      @default(false) // Phase 7, Task 1 — true = erzeugte Rechnung nach Festschreibung automatisch versenden
+  // Phase 8b (§43): Vorlage fuer den automatischen Versand (autoSend); NULL = weiterhin
+  // die Standardvorlage INVOICE (prefillEmail-Default).
+  emailTemplateId  String?
+  emailTemplate    EmailTemplate? @relation(fields: [emailTemplateId], references: [id], onDelete: SetNull)
+  // Phase 8b (§43): ueberstimmt je Abo den Settings-Default (recurringInsertPeriodText).
+  // Default true = uebernimmt den bisherigen Settings-Default beim Anlegen (createRecurring).
+  showPeriodText   Boolean      @default(true)
+  lastRunAt        DateTime?
+  issuedCount      Int          @default(0)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  lines    RecurringInvoiceLine[]
+  invoices Invoice[]
+
+  @@index([orgId])
+  @@index([customerId])
+  @@index([status, nextRunDate])
+  @@index([emailTemplateId])
+}
+
+model RecurringInvoiceLine {
+  id                 String           @id @default(cuid())
+  recurringInvoiceId String
+  recurringInvoice   RecurringInvoice @relation(fields: [recurringInvoiceId], references: [id], onDelete: Cascade)
+  position           Int
+  description        String
+  quantityMilli      Int
+  unit               String           @default("C62")
+  unitNetPriceCents  Int
+  taxRate            Int
+  taxCategory        String           @default("S")
+  discountPermille   Int              @default(0)
+
+  @@index([recurringInvoiceId])
+}
+
+/// Generische Verknuepfung zwischen Belegen (Phase 1). Polymorph ueber Typ+ID, daher ohne
+/// Fremdschluessel; Existenz prueft die Domain (linkDocuments). Die Altfelder
+/// (convertedToInvoiceId, correctsInvoiceId, reversedByInvoiceId, recurringInvoiceId)
+/// bleiben und werden parallel gepflegt.
+model DocumentRelation {
+  id           String       @id @default(cuid())
+  orgId        String
+  org          Organization @relation(fields: [orgId], references: [id])
+  fromType     String // QUOTE | INVOICE | RECURRING | DELIVERY_NOTE | DUNNING
+  fromId       String
+  toType       String
+  toId         String
+  relationType String // CONVERTED_TO | CORRECTS | REVERSES | GENERATED_BY | PARTIAL_OF | DOWNPAYMENT_OF | FINAL_FOR | DELIVERED_BY
+  createdAt    DateTime     @default(now())
+
+  @@unique([fromType, fromId, toType, toId, relationType])
+  @@index([orgId])
+  @@index([fromType, fromId])
+  @@index([toType, toId])
+}
+
+/// Lieferschein — mengenfuehrend, kein GoBD-Beleg, belegt den Leistungszeitpunkt.
+model DeliveryNote {
+  id                  String           @id @default(cuid())
+  orgId               String
+  org                 Organization     @relation(fields: [orgId], references: [id])
+  customerId          String
+  customer            Customer         @relation(fields: [customerId], references: [id])
+  number              String?
+  status              String           @default("DRAFT") // DRAFT | CREATED | SENT | DELIVERED | CANCELLED
+  issueDate           DateTime         @default(now())
+  deliveryDate        DateTime?
+  shippingDate        DateTime?
+  showPrices          Boolean          @default(false)
+  showTax             Boolean          @default(false)
+  showArticleNumber   Boolean          @default(true)
+  showDescription     Boolean          @default(true)
+  showDeliveryAddress Boolean          @default(true) // Phase 7, Task 1 (§36)
+  printOptionsJson    String? // Phase 7, Task 1 — Ueberschreibung der globalen PrintSettings (printOptionsOverrideSchema), nur bei status DRAFT aenderbar
+  notes               String?
+  internalNotes       String?
+  headerText          String?
+  footerText          String?
+  sourceType          String? // QUOTE | INVOICE — Hauptquelle des Belegs
+  sourceId            String?
+  // Phase 8a, Task 1 (§29/§30) — Lieferadresse/Ansprechpartner, analog Invoice/Quote.
+  shippingAddressId   String?
+  shippingAddress     CustomerAddress? @relation("DeliveryNoteShippingAddress", fields: [shippingAddressId], references: [id], onDelete: SetNull)
+  contactPersonId     String?
+  contactPerson       ContactPerson?   @relation(fields: [contactPersonId], references: [id], onDelete: SetNull)
+  contactSnapshotJson String? // Snapshot des gewaehlten Ansprechpartners
+  sellerSnapshotJson  String?
+  buyerSnapshotJson   String?
+  snapshotSource      String?
+  snapshotAt          DateTime?
+  sentAt              DateTime?
+  deliveredAt         DateTime?
+  archivedAt          DateTime?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  lines DeliveryNoteLine[]
+
+  @@index([orgId])
+  @@index([customerId])
+  @@index([shippingAddressId])
+  @@index([contactPersonId])
+}
+
+model DeliveryNoteLine {
+  id                String       @id @default(cuid())
+  deliveryNoteId    String
+  deliveryNote      DeliveryNote @relation(fields: [deliveryNoteId], references: [id], onDelete: Cascade)
+  position          Int
+  sourceType        String? // QUOTE | INVOICE (Quellposition fuer Teil-Lieferungen)
+  sourceId          String?
+  sourceLineId      String? // Positions-ID der Quellzeile
+  description       String
+  articleNumber     String?
+  quantityMilli     Int
+  unit              String       @default("C62")
+  unitNetPriceCents Int?
+  taxRate           Int?
+
+  @@index([deliveryNoteId])
+}
+
+/// Textvorlagen fuer Belege (Kopf-/Fusstext, Bedingungen). Stammdaten — der gerenderte
+/// Text wird beim Erzeugen des Belegs als Snapshot in den Beleg geschrieben.
+model TextTemplate {
+  id        String       @id @default(cuid())
+  orgId     String
+  org       Organization @relation(fields: [orgId], references: [id])
+  name      String
+  docType   String
+  position  String // HEAD | FOOT | TERMS_DELIVERY | TERMS_PAYMENT
+  body      String
+  isDefault Boolean      @default(false)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@unique([orgId, docType, position, name])
+  @@index([orgId, docType])
+}
+
+model EmailTemplate {
+  id        String       @id @default(cuid())
+  orgId     String
+  org       Organization @relation(fields: [orgId], references: [id])
+  name      String
+  docType   String
+  subject   String
+  body      String
+  signature String?
+  isDefault Boolean      @default(false)
+  isSystem  Boolean      @default(false)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  dunningStages     DunningStage[]
+  recurringInvoices RecurringInvoice[]
+
+  @@unique([orgId, docType, name])
+  @@index([orgId, docType])
+}
+
+/// Versandprotokoll. Text vollstaendig, Anhaenge nur als SHA-256 (Betreiberentscheidung).
+model EmailLog {
+  id              String       @id @default(cuid())
+  orgId           String
+  org             Organization @relation(fields: [orgId], references: [id])
+  docType         String
+  docId           String
+  templateId      String?
+  toJson          String       @default("[]")
+  ccJson          String       @default("[]")
+  bccJson         String       @default("[]")
+  fromEmail       String       @default("")
+  replyTo         String?
+  subject         String
+  bodySnapshot    String
+  attachmentsJson String       @default("[]") // [{name, sha256, bytes}]
+  status          String       @default("QUEUED") // QUEUED | SENT | DELIVERED | BOUNCED | FAILED
+  providerId      String?
+  error           String?
+  warningsJson    String       @default("[]")
+  resendOfId      String?
+  sentByUserId    String?
+  sentAt          DateTime?
+  createdAt       DateTime     @default(now())
+
+  @@index([orgId])
+  @@index([docType, docId])
+}
+
+/// SMTP-Zugang je Organisation. passwordEnc: AES-256-GCM, Schluessel aus AUTH_SECRET (src/lib/crypto/secrets.ts).
+model MailSettings {
+  id          String       @id @default(cuid())
+  orgId       String       @unique
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  host        String
+  port        Int
+  security    String // "STARTTLS" | "TLS" | "NONE"
+  username    String?
+  passwordEnc String?
+  fromName    String
+  fromEmail   String
+  replyTo     String?
+  defaultCc   String       @default("")
+  defaultBcc  String       @default("")
+  copyToSelf  Boolean      @default(false)
+  lastTestAt  DateTime?
+  lastTestOk  Boolean?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+/// Zusatzadressen eines Kunden. Die Hauptadresse bleibt in Customer.
+model CustomerAddress {
+  id           String       @id @default(cuid())
+  orgId        String
+  org          Organization @relation(fields: [orgId], references: [id])
+  customerId   String
+  customer     Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  type         String // BILLING | SHIPPING | OTHER
+  label        String?
+  addressLine1 String
+  addressLine2 String?
+  postalCode   String
+  city         String
+  countryCode  String       @default("DE")
+  isDefault    Boolean      @default(false)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  quotes            Quote[]
+  invoicesBilling   Invoice[]      @relation("InvoiceBillingAddress")
+  invoicesShipping  Invoice[]      @relation("InvoiceShippingAddress")
+  deliveryNotesShip DeliveryNote[] @relation("DeliveryNoteShippingAddress")
+
+  @@index([orgId])
+  @@index([customerId])
+}
+
+model ContactPerson {
+  id         String       @id @default(cuid())
+  orgId      String
+  org        Organization @relation(fields: [orgId], references: [id])
+  customerId String
+  customer   Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  firstName  String
+  lastName   String
+  role       String?
+  phone      String?
+  mobile     String?
+  email      String?
+  isDefault  Boolean      @default(false)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  quotes        Quote[]
+  invoices      Invoice[]
+  deliveryNotes DeliveryNote[]
+
+  @@index([orgId])
+  @@index([customerId])
+}
+
+/// Zahlungsmethoden als Stammdaten. Systemeintraege (isSystem) entstehen je Organisation.
+model PaymentMethod {
+  id               String       @id @default(cuid())
+  orgId            String
+  org              Organization @relation(fields: [orgId], references: [id])
+  code             String
+  name             String
+  description      String?
+  paymentTermsDays Int?
+  invoiceText      String?
+  bankAccountRef   String?
+  bankIban         String?
+  bankBic          String?
+  bankName         String?
+  untdidCode       String       @default("ZZZ") // UNTDID 4461 (BT-81)
+  isSystem         Boolean      @default(false)
+  isActive         Boolean      @default(true)
+  sortOrder        Int          @default(0)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  customers Customer[]
+  invoices  Invoice[]
+
+  @@unique([orgId, code])
+  @@index([orgId])
+}
+
+/// Konfigurierbare Mahnstufen. Dunning.level bleibt als historischer Wert bestehen.
+model DunningStage {
+  id                 String         @id @default(cuid())
+  orgId              String
+  org                Organization   @relation(fields: [orgId], references: [id])
+  order              Int
+  name               String
+  daysAfterDue       Int
+  newDueDays         Int            @default(14)
+  feeCents           Int            @default(0)
+  calculateInterest  Boolean
+  includeB2BFlatFee  Boolean
+  emailTemplateId    String?
+  emailTemplate      EmailTemplate? @relation(fields: [emailTemplateId], references: [id])
+  documentTemplateId String?
+  autoSend           Boolean        @default(false) // Versand nur, wenn zusaetzlich global aktiv (DunningSettings.autoSend)
+  enabled            Boolean        @default(true)
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  dunnings Dunning[]
+
+  @@unique([orgId, order])
+  @@index([orgId])
+}
+
+/// Org-weite Mahnwesen-Einstellungen (Phase 6) — globale Automatik-Schalter und
+/// Basiszinssatz-Override. Ohne gespeicherte Zeile gelten die Defaults (Selbstheilung
+/// analog DocumentSettings), bevor eine Organisation die Einstellungen zum ersten Mal
+/// oeffnet.
+model DunningSettings {
+  id                 String       @id @default(cuid())
+  orgId              String       @unique
+  org                Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  autoCreate         Boolean      @default(true)
+  autoSend           Boolean      @default(false) // §26: Default AUS; Versand nur wenn global UND je Stufe aktiv
+  baseInterestRateBp Int          @default(127) // Basiszinssatz in Basispunkten (1,27 % = 127)
+  baseRateValidFrom  DateTime?
+  gracePeriodDays    Int          @default(0)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+}
+
+/// Protokoll der Scheduler-Laeufe (Phase 6) — DB-Lock und Nachvollziehbarkeit fuer den
+/// Intervall-Runner (dunning, recurring). Kein Org-Bezug: der Scheduler laeuft prozessweit
+/// ueber alle Organisationen hinweg, ein Lauf verarbeitet mehrere Organisationen seriell.
+model SchedulerRun {
+  id          String    @id @default(cuid())
+  job         String // dunning | recurring
+  trigger     String // cron | api | manual
+  status      String // RUNNING | OK | FAILED
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+  summaryJson String?
+  error       String?
+
+  @@index([job, startedAt])
+}
+
+/// Atomarer DB-Lock je Job (Fix Runde 1, Phase 6 Task 3) — die Praxis "findFirst dann
+/// create" auf SchedulerRun war unter Postgres READ COMMITTED nicht atomar (zwei
+/// gleichzeitige Laeufe konnten beide passieren). Der Primaerschluessel `job` erzwingt
+/// stattdessen ueber den Unique-Constraint, dass `create` bei bereits bestehendem Lock
+/// mit P2002 scheitert -- das ist die tatsaechliche Entscheidung, nicht die vorherige
+/// Lesepruefung. `runId` verknuepft den Lock mit dem SchedulerRun-Eintrag (fuer den
+/// gezielten Release im `finally`); `lockedAt` traegt die Stale-Grenze (30 Minuten).
+model SchedulerLock {
+  job      String   @id
+  runId    String
+  lockedAt DateTime @default(now())
 }
 
 /// Anmeldekonto (Self-Hosting). MVP: ein Admin-Konto, beim ersten Start angelegt.
@@ -272,16 +892,16 @@ model User {
 
 /// Append-only Änderungsprotokoll (GoBD-Kern). Hash-Chain macht Manipulation erkennbar.
 model ChangeLog {
-  id       Int      @id @default(autoincrement()) // streng monotone Einfüge-Reihenfolge für die Hash-Chain
+  id       Int          @id @default(autoincrement()) // streng monotone Einfüge-Reihenfolge für die Hash-Chain
   orgId    String
   org      Organization @relation(fields: [orgId], references: [id])
-  entity   String   // INVOICE | PAYMENT | CUSTOMER | …
+  entity   String // INVOICE | PAYMENT | CUSTOMER | …
   entityId String
-  action   String   // CREATE | UPDATE | FINALIZE | CANCEL | DELETE_PRE_FINALIZE
-  actor    String   @default("system")
-  at       DateTime @default(now())
-  diffJson String   @default("{}")
-  prevHash String   @default("")
+  action   String // CREATE | UPDATE | FINALIZE | CANCEL | DELETE_PRE_FINALIZE
+  actor    String       @default("system")
+  at       DateTime     @default(now())
+  diffJson String       @default("{}")
+  prevHash String       @default("")
   hash     String
 
   // Verhindert ein stilles Forken der Hash-Chain bei nebenläufigen Schreibern:
@@ -291,50 +911,335 @@ model ChangeLog {
   @@index([entity, entityId])
 }
 
-model RecurringInvoice {
-  id               String   @id @default(cuid())
-  orgId            String
-  org              Organization @relation(fields: [orgId], references: [id])
-  customerId       String
-  customer         Customer @relation(fields: [customerId], references: [id])
-  title            String
-  status           String   @default("ACTIVE")
-  interval         String   @default("MONTHLY")
-  intervalCount    Int      @default(1)
-  anchorDay        Int?
-  startDate        DateTime
-  nextRunDate      DateTime
-  endDate          DateTime?
-  taxScheme        String   @default("REGULAR")
-  currency         String   @default("EUR")
-  paymentTermsDays Int      @default(14)
-  notes            String?
-  autoFinalize     Boolean  @default(false)
-  lastRunAt        DateTime?
-  issuedCount      Int      @default(0)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+/// Angebotsannahme-Link (Phase 3b). orgId wie EmailLog als reines Feld ohne Relation
+/// (Tenancy-Filter genuegt; kein Cascade-Delete ueber Organization noetig).
+model QuoteShareLink {
+  id             String    @id @default(cuid())
+  orgId          String
+  quoteId        String
+  quote          Quote     @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  tokenHash      String    @unique
+  tokenEnc       String? // Task-1-Adjudikation: AES-256-GCM-verschluesselt (AUTH_SECRET), fuer Betreiber-Wiederabruf
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  createdBy      String
+  createdAt      DateTime  @default(now())
+  viewCount      Int       @default(0)
+  lastViewedAt   DateTime?
+  decidedAt      DateTime?
+  decision       String? // ACCEPTED | REJECTED
+  deciderName    String?
+  deciderEmail   String?
+  deciderComment String?
+  deciderIp      String?
 
-  lines    RecurringInvoiceLine[]
-  invoices Invoice[]
-
-  @@index([orgId])
-  @@index([customerId])
-  @@index([status, nextRunDate])
+  @@index([orgId, quoteId])
 }
 
-model RecurringInvoiceLine {
-  id                 String @id @default(cuid())
-  recurringInvoiceId String
-  recurringInvoice   RecurringInvoice @relation(fields: [recurringInvoiceId], references: [id], onDelete: Cascade)
-  position           Int
-  description        String
-  quantityMilli      Int
-  unit               String @default("C62")
-  unitNetPriceCents  Int
-  taxRate            Int
-  taxCategory        String @default("S")
-  discountPermille   Int    @default(0)
+/// Org-weite Einstellungen fuer Angebotsannahme und Dokumentverhalten (Phase 3b).
+model DocumentSettings {
+  id                           String       @id @default(cuid())
+  orgId                        String       @unique
+  org                          Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  onQuoteAccept                String       @default("NONE") // NONE | ORDER_CONFIRMATION | INVOICE
+  shareLinkDays                Int          @default(30)
+  storeAcceptIp                Boolean      @default(false)
+  // Phase 7, Task 1 — weitere org-weite Dokument-Defaults (Belegeinstellungen, §33).
+  autoFinalizeOnSend           Boolean      @default(false)
+  defaultCurrency              String       @default("EUR")
+  quoteValidityDays            Int          @default(30)
+  shareLinkDefaultOn           Boolean      @default(true)
+  dnShowPrices                 Boolean      @default(false)
+  dnShowArticleNumber          Boolean      @default(true)
+  dnShowDeliveryAddress        Boolean      @default(true)
+  invoiceDueDays               Int          @default(14)
+  showPaymentTermsText         Boolean      @default(true)
+  autoDeliveryDate             Boolean      @default(true)
+  refreshIssueDateOnFinalize   Boolean      @default(true)
+  offerLastDocument            Boolean      @default(true)
+  eInvoiceDefault              Boolean      @default(true)
+  defaultPaymentMethodId       String?
+  recurringInsertPeriodText    Boolean      @default(true)
+  recurringAutoFinalizeDefault Boolean      @default(false)
+  recurringAutoSendDefault     Boolean      @default(false)
+  /// Phase 12c — freigegebene Steuersaetze der Organisation als JSON-Array ganzer
+  /// Prozentwerte (taxRatesSchema, 1..10 Eintraege, 0..100). Wirkt nur auf neue/geaenderte
+  /// Entwuerfe: ein festgeschriebener Beleg behaelt seinen Satz (GoBD, §51).
+  taxRatesJson                 String       @default("[19,7,0]")
+  updatedAt                    DateTime     @updatedAt
+}
 
-  @@index([recurringInvoiceId])
+/// Briefpapier/Branding einer Organisation (Phase 7, Task 1, §35) — Logo, Farbe,
+/// Fusszeilen, Ränder, Hintergrundbild. Selbstheilung analog DocumentSettings
+/// (In-Memory-Default, solange keine Zeile existiert).
+model BrandingSettings {
+  id               String       @id @default(cuid())
+  orgId            String       @unique
+  org              Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  logoPath         String?
+  logoWidthMm      Int          @default(40)
+  primaryColor     String       @default("#111111")
+  senderLine       String?
+  footerLeft       String?
+  footerCenter     String?
+  footerRight      String?
+  marginTopMm      Int          @default(20)
+  marginRightMm    Int          @default(18)
+  marginBottomMm   Int          @default(20)
+  marginLeftMm     Int          @default(18)
+  fontSizePt       Int          @default(10)
+  backgroundPath   String?
+  showBackground   Boolean      @default(false)
+  // Phase 11b — PDF-Layouts (Spec Phase 11): Organisationsstandard, Map je Belegtyp (JSON), Fusszeilenmodus.
+  layoutId         String       @default("standard")
+  layoutByTypeJson String?
+  footerMode       String       @default("AUTO") // AUTO (vierspaltig aus Stammdaten) | CUSTOM (footerLeft/Center/Right)
+  /// Phase 12c — White-Label. NULL bedeutet ueberall "Produktvorgabe" (appName
+  /// "OpenInvoice Germany", appShortName "OI", src/app/favicon.ico, kein Sidebar-Logo).
+  /// Die AGPL-Herkunftszeile in AppShell/SlimShell ist davon NICHT betroffen (§13 AGPL).
+  appName          String?
+  appShortName     String?
+  faviconPath      String?
+  appLogoPath      String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+}
+
+/// Globale Druckoptionen einer Organisation (Phase 7, Task 1, §36) — je Beleg per
+/// `printOptionsJson` (Invoice/Quote/DeliveryNote) ueberschreibbar (effectivePrintOptions).
+model PrintSettings {
+  id                 String       @id @default(cuid())
+  orgId              String       @unique
+  org                Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  showFooter         Boolean      @default(true)
+  showPageNumbers    Boolean      @default(true)
+  foldMarks          Boolean      @default(false)
+  punchMarks         Boolean      @default(false)
+  showArticleNumber  Boolean      @default(true)
+  showDescription    Boolean      @default(true)
+  showTaxRatePerLine Boolean      @default(true)
+  showLineTotals     Boolean      @default(true)
+  showSenderLine     Boolean      @default(true)
+  showGiroCode       Boolean      @default(true)
+  /// Phase 12a — Kantenlaenge des GiroCode in mm (15..40, Zod). Teil der Druckoptionen,
+  /// wird beim Festschreiben mit eingefroren (freezePrintOptionsJson).
+  giroSizeMm         Int          @default(22)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+}
+
+/// Beleganhang (Phase 4b) — Datei ausserhalb des Web-Roots (§38), Zugriff nur org-geprueft.
+/// Whitelist + Magic-Bytes-Pruefung erzwingt src/lib/attachments (nicht dieses Modell).
+/// Kein GoBD-Beleg: loeschbar, Loeschung wird ueber ActivityLog protokolliert (Audit K5),
+/// nicht ueber die ChangeLog-Hash-Kette.
+model DocumentAttachment {
+  id          String       @id @default(cuid())
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id])
+  docType     String // QUOTE | INVOICE | DELIVERY_NOTE | DUNNING | RECURRING
+  docId       String
+  filename    String
+  mime        String
+  sizeBytes   Int
+  sha256      String
+  storagePath String
+  uploadedBy  String
+  createdAt   DateTime     @default(now())
+
+  @@unique([orgId, sha256, docType, docId])
+  @@index([orgId, docType, docId])
+}
+
+/// Aktivitaetsprotokoll (Phase 8b, Task 3) — GoBD-KEIN Ersatz fuer die ChangeLog-Hash-Kette
+/// (Audit K5): ein Schreiber (`logActivity`, src/domain/activity/log.ts) darf NIE werfen und
+/// das ausloesende Ereignis nie verhindern. Speist `buildTimeline` (src/domain/timeline/build.ts).
+model ActivityLog {
+  id         String   @id @default(cuid())
+  orgId      String
+  entityType String // INVOICE | QUOTE | DELIVERY_NOTE | CUSTOMER | RECURRING
+  entityId   String
+  type       String // siehe ACTIVITY_TYPES (src/domain/activity/log.ts)
+  actor      String
+  at         DateTime @default(now())
+  dataJson   String?
+
+  @@index([orgId, entityType, entityId, at])
+}
+
+/// In-App-Benachrichtigung je Organisation (Phase 8b, Task 3) — erzeugt vom Scheduler-Job
+/// `notifications` (src/domain/notifications/job.ts) und Ereignis-Hooks
+/// (src/domain/notifications/hooks.ts). `dedupeKey` verhindert Doppel-Benachrichtigungen
+/// ueber mehrere Job-Laeufe hinweg (upsert-ignore in `createNotification`).
+model Notification {
+  id         String    @id @default(cuid())
+  orgId      String
+  type       String // siehe NOTIFICATION_TYPES (src/domain/notifications/settings.ts)
+  title      String
+  body       String?
+  link       String?
+  entityType String?
+  entityId   String?
+  createdAt  DateTime  @default(now())
+  readAt     DateTime?
+  dedupeKey  String
+
+  @@unique([orgId, dedupeKey])
+  @@index([orgId, readAt, createdAt])
+}
+
+/// Benachrichtigungs-Einstellungen je Organisation (Phase 8b, Task 3) — Selbstheilung
+/// (`loadNotificationSettings`) legt bei fehlender Zeile alle Typen aktiviert / Digest
+/// deaktiviert an.
+model NotificationSettings {
+  id               String    @id @default(cuid())
+  orgId            String    @unique
+  enabledTypesJson String
+  emailDigest      Boolean   @default(false)
+  lastDigestAt     DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+/// API-Schluessel je Organisation (Phase 10, Task 1) — Bearer-Auth fuer /api/v1/*.
+/// Nur der SHA-256-Hash wird gespeichert; das Klartext-Token (`oig_<32 Byte base64url>`)
+/// wird ausschliesslich beim Erzeugen einmalig angezeigt (siehe src/domain/api-key/create.ts).
+/// scopesJson: kommagetrennte Liste aus read/write/send/admin, via Zod geparst — kein
+/// Prisma-Enum/Array fuer SQLite/Postgres-Portabilitaet (siehe Kopfkommentar der Datei).
+model ApiKey {
+  id         String    @id @default(cuid())
+  orgId      String
+  name       String
+  keyHash    String    @unique
+  prefix     String
+  scopesJson String
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  createdBy  String?
+  createdAt  DateTime  @default(now())
+
+  @@index([orgId])
+}
+
+/// Idempotenz-Schluessel fuer schreibende API-v1-Aktionen (Phase 10, Fix-Runde 1) — Header
+/// `Idempotency-Key` (nur POST). Reserve-First-Zustandsmaschine gegen Wettlaufsituationen
+/// (S1): `status` startet IN_PROGRESS (durch das @@unique([orgId, key]) gegen Doppel-
+/// Reservierung abgesichert), wechselt nach dem Handler zu DONE (responseJson/statusCode
+/// gefuellt) oder die Zeile wird bei einem Fehler/5xx geloescht (Retry moeglich). Ablauf
+/// 24h fuer BEIDE Zustaende, Aufraeumen lazy beim naechsten Lesen desselben Schluessels
+/// (kein eigener Scheduler-Job). Siehe src/api/idempotency.ts fuer den vollen Ablauf.
+model ApiIdempotency {
+  id           String   @id @default(cuid())
+  orgId        String
+  key          String
+  requestHash  String
+  status       String   @default("IN_PROGRESS") // IN_PROGRESS | DONE
+  responseJson String? // erst bei status=DONE gefuellt
+  statusCode   Int? // erst bei status=DONE gefuellt
+  createdAt    DateTime @default(now())
+
+  @@unique([orgId, key])
+  @@index([orgId, createdAt])
+}
+
+/// Anfrageprotokoll der REST-API (Phase 12d, §18 COMPLIANCE.md). Standardmaessig AUS
+/// (ApiSettings.logRequests). Bodies nur bei zusaetzlich eingeschaltetem logBodies,
+/// Antwort-Bodies nur bei status >= 400, beide auf 2048 Byte gekuerzt und geschwaerzt.
+/// KEIN Belegereignis -> geht NICHT in den ChangeLog (Audit-Ruling K5).
+/// `orgId` ohne Relationsfeld — wie ApiIdempotency/WebhookDelivery (Infrastrukturtabelle).
+model ApiRequestLog {
+  id             String   @id @default(cuid())
+  orgId          String
+  apiKeyId       String?
+  requestId      String
+  method         String
+  path           String
+  query          String?
+  status         Int
+  durationMs     Int
+  errorCode      String?
+  ip             String?
+  userAgent      String?
+  requestBody    String?
+  responseBody   String?
+  bodyTruncated  Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  @@index([orgId, createdAt])
+  @@index([orgId, status, createdAt])
+  // Ohne orgId-Praefix: der Aufraeumjob scannt ueber alle Organisationen
+  // (gleiches Muster wie WebhookDelivery.@@index([status, nextAttemptAt])).
+  @@index([createdAt])
+}
+
+/// Schalter und Retention des Anfrageprotokolls je Organisation (Phase 12d).
+model ApiSettings {
+  id            String   @id @default(cuid())
+  orgId         String   @unique
+  logRequests   Boolean  @default(false)
+  logBodies     Boolean  @default(false)
+  retentionDays Int      @default(7)
+  maxRows       Int      @default(2000)
+  updatedAt     DateTime @updatedAt
+}
+
+/// Webhook-Endpunkt einer Organisation (Phase 10, Task 5/10b) — URL + verschluesseltes
+/// Secret (AES-GCM, src/lib/crypto/secrets.ts) + abonnierte Ereignisse (eventsJson,
+/// JSON-Array aus src/schemas/webhook.ts#WEBHOOK_EVENTS). Kein Klartext-Secret nach der
+/// Erzeugung/Rotation abrufbar (analog ApiKey). `active=false` deaktiviert Zustellung UND
+/// Anlage neuer Deliveries (emitEvent filtert danach) — kein Hard-Delete, damit
+/// WebhookDelivery-Historie referenzierbar bleibt (siehe WebhookDelivery.onDelete).
+model WebhookEndpoint {
+  id         String            @id @default(cuid())
+  orgId      String
+  url        String
+  secretEnc  String
+  eventsJson String
+  active     Boolean           @default(true)
+  createdBy  String?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  deliveries WebhookDelivery[]
+
+  @@index([orgId])
+}
+
+/// Eine Zustellung eines Ereignisses an einen Endpunkt (Outbox-Zeile, Phase 10, Task 5) —
+/// wird von `emitEvent` (src/domain/webhook/emit.ts) IN DERSELBEN Transaktion wie
+/// `appendChangeLog` angelegt (status PENDING), von `runWebhookDeliveries`
+/// (src/domain/webhook/deliver.ts, Scheduler-Job "webhooks") seriell abgearbeitet.
+/// `dataJson` ist der Serializer-Snapshot (Task 2, ohne internalNotes) zum
+/// Emit-Zeitpunkt — die tatsaechlich gesendete Nutzlast (`{id,type,createdAt,data}`)
+/// wird erst bei der Zustellung aus id/event/createdAt/dataJson zusammengesetzt.
+/// `attempts`/`nextAttemptAt` steuern Backoff (1/5/30/120/600 Min., DEAD nach dem 6. fehlgeschlagenen Versuch);
+/// `replayOfId` verweist auf die urspruengliche Zeile, wenn diese Zeile ein manueller
+/// Replay ist (jeder Replay legt eine NEUE Zeile an, aendert nie die alte).
+model WebhookDelivery {
+  id            String          @id @default(cuid())
+  orgId         String
+  endpointId    String
+  endpoint      WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  event         String
+  objectName    String
+  objectId      String
+  dataJson      String
+  status        String          @default("PENDING") // PENDING | DELIVERED | FAILED | DEAD
+  attempts      Int             @default(0)
+  nextAttemptAt DateTime        @default(now())
+  lastAttemptAt DateTime?
+  responseCode  Int?
+  responseBody  String?
+  lastError     String?
+  replayOfId    String?
+  createdAt     DateTime        @default(now())
+  deliveredAt   DateTime?
+
+  // Fix-Welle (Should-fix 7): der Scheduler-Job "webhooks" filtert AUSSCHLIESSLICH auf
+  // status + nextAttemptAt (kein orgId-Praedikat, siehe deliver.ts#runWebhookDeliveries) —
+  // der bisherige Index (orgId, status, nextAttemptAt) kann dafuer die fuehrende Spalte
+  // nicht nutzen (sequenzieller Scan bei jedem Tick). Eigener Index ohne orgId zusaetzlich
+  // zum bestehenden (der bleibt fuer org-gescopte Abfragen, z. B. das Zustellprotokoll-UI).
+  @@index([orgId, status, nextAttemptAt])
+  @@index([status, nextAttemptAt])
+  @@index([endpointId, createdAt])
 }

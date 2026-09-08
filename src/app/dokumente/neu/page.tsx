@@ -1,8 +1,10 @@
 import Link from "next/link";
 import { dbInternal } from "@/lib/db";
 import { getActiveOrg } from "@/lib/org";
-import { NewDocumentForm } from "@/components/NewDocumentForm";
+import { DocumentEditor } from "@/components/editor/DocumentEditor";
 import { NeedOrgNotice } from "@/components/NeedOrgNotice";
+import { loadDocumentSettings } from "@/domain/document/settings";
+import { listLayouts } from "@/lib/pdf/layouts/registry";
 
 export const dynamic = "force-dynamic";
 
@@ -14,14 +16,45 @@ export default async function NeuesDokumentPage() {
     return <NeedOrgNotice />;
   }
 
-  const [customers, products] = await Promise.all([
-    dbInternal.customer.findMany({ where: { orgId, isArchived: false }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
-    dbInternal.product.findMany({
+  const [customers, products, contactRows, addressRows] = await Promise.all([
+    dbInternal.customer.findMany({
       where: { orgId, isArchived: false },
-      select: { id: true, name: true, unit: true, netPriceCents: true, taxRate: true },
+      select: {
+        id: true,
+        name: true,
+        customerNumber: true,
+        email: true,
+        defaultDiscountPermille: true,
+        addressLine1: true,
+        postalCode: true,
+        city: true,
+        countryCode: true,
+      },
       orderBy: { name: "asc" },
     }),
+    dbInternal.product.findMany({
+      where: { orgId, isArchived: false },
+      select: { id: true, name: true, unit: true, netPriceCents: true, taxRate: true, articleNumber: true },
+      orderBy: { name: "asc" },
+    }),
+    dbInternal.contactPerson.findMany({ where: { orgId }, orderBy: { lastName: "asc" } }),
+    dbInternal.customerAddress.findMany({ where: { orgId }, orderBy: { label: "asc" } }),
   ]);
+  const documentSettings = await loadDocumentSettings(orgId);
+
+  const contacts = contactRows.map((c) => ({
+    id: c.id,
+    customerId: c.customerId,
+    name: `${c.firstName} ${c.lastName}${c.role ? ` (${c.role})` : ""}`,
+    isDefault: c.isDefault,
+  }));
+  const addresses = addressRows.map((a) => ({
+    id: a.id,
+    customerId: a.customerId,
+    type: a.type as "BILLING" | "SHIPPING" | "OTHER",
+    isDefault: a.isDefault,
+    label: a.label ? `${a.label} — ${a.addressLine1}, ${a.postalCode} ${a.city}` : `${a.addressLine1}, ${a.postalCode} ${a.city}`,
+  }));
 
   if (customers.length === 0) {
     return (
@@ -36,14 +69,17 @@ export default async function NeuesDokumentPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <Link href="/dokumente" className="text-sm text-slate-500 hover:text-slate-800">
-          ← Dokumente
-        </Link>
-        <h1 className="text-2xl font-bold tracking-tight">Neues Dokument</h1>
-      </div>
-      <NewDocumentForm customers={customers} products={products} />
-    </div>
+    <DocumentEditor
+      mode="DOCUMENT"
+      customers={customers}
+      products={products}
+      taxRates={documentSettings.taxRates}
+      contacts={contacts}
+      addresses={addresses}
+      layouts={listLayouts()}
+      offerLastDocument={documentSettings.offerLastDocument}
+      backHref="/dokumente"
+      title="Neues Dokument"
+    />
   );
 }

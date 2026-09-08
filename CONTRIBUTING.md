@@ -12,6 +12,43 @@ npm run db:seed
 npm run dev
 ```
 
+Schemaänderungen betreffen **beide** Schemadateien. `prisma/schema.postgres.prisma`
+unterscheidet sich von `prisma/schema.prisma` nur in der Provider-Zeile und wird
+abgeleitet:
+
+```bash
+sed 's/provider = "sqlite"/provider = "postgresql"/' prisma/schema.prisma \
+  > prisma/schema.postgres.prisma
+```
+
+Danach je eine Migration pro Provider erzeugen. Für SQLite genügt:
+
+```bash
+npm run db:migrate -- --name <beschreibung>
+```
+
+Für PostgreSQL braucht es eine vom Host erreichbare Datenbank. Der `db`-Service in
+`docker-compose.yml` veröffentlicht bewusst keinen Port (er läuft mit
+`POSTGRES_HOST_AUTH_METHOD: trust`), deshalb dafür einen Wegwerf-Container nutzen:
+
+```bash
+docker run -d --name oig-migrate \
+  -e POSTGRES_USER=oig -e POSTGRES_PASSWORD=test -e POSTGRES_DB=openinvoice \
+  -p 55432:5432 postgres:16-alpine
+export DATABASE_URL="postgresql://oig:test@localhost:55432/openinvoice?schema=public"
+npx prisma migrate deploy --config prisma.postgres.config.ts   # Baseline anwenden
+npm run db:migrate:pg -- --name <beschreibung>
+docker rm -f oig-migrate
+```
+
+`migrate dev` erzeugt am Ende den Prisma-Client neu. Weil beide Schemadateien in
+denselben Pfad (`src/generated/prisma`) generieren, ruft `db:migrate:pg` über
+`scripts/migrate-postgres.sh` anschließend `prisma generate` auf und stellt den
+SQLite-Client wieder her — sonst schlagen danach `npm test` und `npm run dev` mit
+einem irreführenden Protokollfehler fehl.
+
+Der CI-Job `schema-drift` schlägt fehl, wenn die beiden Dateien auseinanderlaufen.
+
 ## Vor jedem Pull Request
 
 ```bash
@@ -36,17 +73,7 @@ Korrekturen an Pflichtangaben, Fristen, Steuerlogik etc. **immer mit Quelle** (N
 
 ## Developer Certificate of Origin (DCO)
 
-Bitte signiere deine Commits (`git commit -s`). Damit bestätigst du das [DCO](https://developercertificate.org/): Du hast das Recht, den Beitrag einzureichen, und reichst ihn unter der Projektlizenz ein. Das DCO überträgt kein Copyright — dein Beitrag bleibt deiner und steht wie das übrige Projekt unter AGPL-3.0.
-
-## Größere Beiträge
-
-Ein ganzes Feature oder ein umgebauter Fork ist willkommen, aber bitte nicht als ein einziger Monster-PR. Schneide ihn in thematische PRs, die einzeln lauffähig und einzeln sinnvoll sind (z. B. „E-Mail-Versand", „Belegfluss", „REST-API"). Jeder PR gegen den aktuellen `main`, mit Tests für neue Logik und den vier Gates von oben.
-
-Am besten vorher kurz ein Issue aufmachen und den geplanten Schnitt beschreiben — dann klären wir Reihenfolge und Überschneidungen, bevor du Arbeit in etwas steckst, das so nicht passt.
-
-Bei rechtsnahen Änderungen (Pflichtangaben, Steuerlogik, Nummernkreis, Festschreibung, Hash-Chain) rechne mit einer gründlicheren Runde. Das ist die Stelle, an der ein Fehler beim Nutzer teuer wird.
-
-Reviews können ein paar Tage dauern. Wenn du nach einer Woche nichts gehört hast, ping im PR oder schreib an info@automationsmanufaktur.de.
+Bitte signiere deine Commits (`git commit -s`). Damit bestätigst du das [DCO](https://developercertificate.org/). Das hält dem Projekt die Option offen, die Lizenzierung später anzupassen (z. B. optionales Dual-Licensing), ohne den Closed-Source-SaaS-Schutz der AGPL aufzugeben.
 
 ## Tests
 

@@ -13,6 +13,13 @@ export interface EInvoiceParty {
   phone?: string | null;
   contactName?: string | null;
   electronicAddress?: string | null; // Peppol/Leitweg-Endpoint
+  /**
+   * Fix-Welle (Abschluss-Review Phase 11b, Block 3 — Referenzbeleg RE-41362): Kundennummer
+   * (BEIM KAEUFER; Customer.customerNumber, Phase 7 §34) fuers PDF-Meta ("Ihre
+   * Kundennummer") — kein XML-Feld. Optional, damit bestehende Aufrufer/Fixtures ohne
+   * dieses Feld unveraendert bleiben.
+   */
+  customerNumber?: string | null;
 }
 
 export interface EInvoiceLine {
@@ -24,13 +31,59 @@ export interface EInvoiceLine {
   lineNetCents: number;
   taxRate: number;
   taxCategory: string; // UNTDID 5305
+  // BG-27 — Positionsrabatt (Phase 4a). Optional: fehlt bei Belegen ohne Rabatt
+  // (Alt-Belege, handgeschriebene Test-Fixtures) — Builder erzeugen dann KEIN
+  // Zeilen-AllowanceCharge, byte-identisch zum bisherigen Verhalten.
+  /** Menge * unitNetPriceCents (unrabattiert) — BaseAmount des Zeilenrabatts. */
+  grossLineCents?: number;
+  /** Gesamtrabatt der Zeile in Cent (Prozent- + Festbetragsanteil), 0 = kein Rabatt. */
+  discountCents?: number;
+  /** Prozentualer Anteil des Rabatts in Promille — nur gesetzt, wenn der Rabatt
+   * REIN prozentual ist (kein zusätzlicher Festbetrag), für MultiplierFactorNumeric. */
+  discountPermille?: number;
+  /** Phase 4b — Zeilentyp (§8, "kein Menge-0-Workaround"). Fehlt das Feld (Alt-Fixtures/
+   * Tests vor Phase 4b), wird ITEM angenommen. Nur ITEM-Zeilen gehen ins XML (BG-25) und
+   * tragen Beträge; HEADING/TEXT/SUBTOTAL sind reine PDF-Gliederungszeilen. */
+  lineType?: "ITEM" | "HEADING" | "TEXT" | "SUBTOTAL";
+  /** Phase 4b — Rich-Text-Langbeschreibung (Markdown-Teilmenge, siehe src/lib/richtext).
+   * BT-154 im XML: NUR bei ITEM-Zeilen, als Klartext (plainText(parseRichText(...))) durch
+   * die XML-Builder erzeugt. Das PDF rendert die Markdown-Formatierung direkt. Bei TEXT-
+   * Zeilen trägt dieses Feld den Absatztext (Fallback: description). */
+  descriptionLong?: string | null;
+  /** Phase 4b — Artikelnummer-Snapshot zum Erfassungszeitpunkt. BT-155 im XML (nur ITEM). */
+  articleNumber?: string | null;
 }
 
 export interface EInvoiceTaxSubtotal {
   taxCategory: string;
   taxRate: number;
+  /** Netto NACH Belegrabatt/-aufschlag — Bemessungsgrundlage der Steuer. */
   netCents: number;
   taxCents: number;
+  /** Netto VOR Belegrabatt/-aufschlag. Optional (Alt-Belege ohne Beleganpassung: = netCents). */
+  baseNetCents?: number;
+  /** Anteiliger Belegrabatt dieser Gruppe. */
+  allowanceCents?: number;
+  /** Anteiliger Belegaufschlag dieser Gruppe. */
+  chargeCents?: number;
+}
+
+/** BG-20/BG-21 — Beleg-Rabatt bzw. -Aufschlag je Steuersatz-Gruppe (Phase 4a). */
+export interface EInvoiceDocumentAllowanceCharge {
+  amountCents: number;
+  baseCents: number;
+  taxRate: number;
+  taxCategory: string;
+  reason: string;
+}
+
+/** BT-81/BT-84 ff. — Zahlungsweg, aus dem Zahlungsmethoden-Snapshot (Phase 4a). */
+export interface EInvoicePaymentMeans {
+  /** UNTDID 4461 (z. B. "58" SEPA-Überweisung, "10" Barzahlung). */
+  code: string;
+  iban?: string | null;
+  bic?: string | null;
+  accountName?: string | null;
 }
 
 export interface EInvoiceData {
@@ -39,9 +92,22 @@ export interface EInvoiceData {
   issueDate: Date; // BT-2
   dueDate?: Date | null; // BT-9
   deliveryDate?: Date | null; // BT-72
+  deliveryStart?: Date | null;         // BT-73 (BG-14)
+  deliveryEnd?: Date | null;           // BT-74 (BG-14)
+  deliverToCountryCode?: string | null; // BT-80 (BG-15), Default: Land des Kaeufers
   currency: string; // BT-5
   buyerReference?: string | null; // BT-10 (Leitweg-ID im B2G)
-  paymentTerms?: string | null; // BT-20
+  /** Phase 4b — Bestellnummer des Kunden (BT-13, cac:OrderReference/cbc:ID bzw.
+   * ram:BuyerOrderReferencedDocument/ram:IssuerAssignedID). Nicht mit buyerReference (BT-10)
+   * zu verwechseln. */
+  orderNumber?: string | null;
+  paymentTerms?: string | null; // BT-20 (Menschentext, z. B. aus Zahlungsmethode/Freitext)
+  /** BT-20 XML-Fassung inkl. Skonto-Syntax (#SKONTO#...#) — Mapper-Ausgabe von
+   * xrechnungSkontoNote(). Fehlt dieses Feld, nutzen die Builder `paymentTerms`. */
+  paymentTermsNote?: string | null;
+  /** Fix-Runde 1 (Befund C): Klartext OHNE #SKONTO#-Tags — invoice.paymentTerms bzw.
+   * (wenn leer) paymentTermsText(skontoTerms). NUR fuers PDF, nicht ins XML. */
+  paymentTermsHuman?: string | null;
   notes?: string | null; // BT-22
   seller: EInvoiceParty;
   buyer: EInvoiceParty;
@@ -55,7 +121,68 @@ export interface EInvoiceData {
   iban?: string | null;
   bic?: string | null;
   bankName?: string | null;
+  // BG-20/BG-21 — Beleg-Rabatt/-Aufschlag (Phase 4a), je Steuersatz-Gruppe.
+  documentAllowances?: EInvoiceDocumentAllowanceCharge[];
+  documentCharges?: EInvoiceDocumentAllowanceCharge[];
+  /** Σ Positionsnetti (nach Zeilenrabatt, vor Beleganpassung) — BT-106-Vorstufe. */
+  lineTotalCents?: number;
+  /** Σ Belegrabatt über alle Gruppen. */
+  allowanceTotalCents?: number;
+  /** Σ Belegaufschlag über alle Gruppen. */
+  chargeTotalCents?: number;
+  /** BT-81 ff. — Zahlungsweg aus dem Zahlungsmethoden-Snapshot (Fallback: Org-Konto, Code 58). */
+  paymentMeans?: EInvoicePaymentMeans | null;
+  /** Freitext der Zahlungsmethode (invoiceText) — NUR PDF-Layout, nicht im XML. */
+  paymentMethodText?: string | null;
   // BG-3 Vorausgehende Rechnung (für Gutschrift/Korrektur, BT-25/BT-26)
   precedingInvoiceNumber?: string | null;
   precedingInvoiceDate?: Date | null;
+  /** Phase 5 — BG-3 mit MEHREREN Vorgängern (Schlussrechnung: je abgesetzte
+   * Abschlagsrechnung ein Eintrag, BT-25/BT-26). Ist dieses Array gesetzt (nicht leer),
+   * hat es beim XML-Export Vorrang vor precedingInvoiceNumber/-Date; ohne dieses Feld
+   * (Alt-/Nicht-FINAL-Belege) bleibt das bisherige Einzelverhalten byte-identisch. */
+  precedingInvoices?: { number: string; issueDate: Date }[];
+  /** Phase 5 (§14 Abs. 5 Satz 2 UStG) — auf einer Schlussrechnung abgesetzte
+   * Abschlagsrechnungen, je Abschlagsrechnung über alle Steuersätze aggregiert
+   * (Snapshot aus FinalInvoiceDeduction). Nur bei type FINAL gesetzt; NIE live aus den
+   * Abschlagsrechnungen selbst. */
+  deductions?: EInvoiceDeduction[];
+  /** Phase 5 — Nummer der Quelle (Angebot/Auftragsbestätigung/Lieferschein) bei
+   * type PARTIAL/DOWNPAYMENT/FINAL. NUR fürs PDF ("Bezug zu ..."), geht NICHT ins XML. */
+  sourceNumber?: string | null;
+  /** Phase 5 — Menschentext-Label der Quellart fürs PDF ("Angebot" | "Auftrag" |
+   * "Lieferschein"). NUR fürs PDF-Layout. */
+  sourceLabel?: string | null;
+  // Kopf-/Fusstext (Platzhalter bereits aufgeloest) — NUR fuer PDF-Layout, Ruling:
+  // gehen NICHT ins XRechnung-/ZUGFeRD-XML.
+  headerText?: string | null;
+  footerText?: string | null;
+  /** Phase 7 (§37) — offener Betrag zum Renderzeitpunkt (`payableBaseCents(invoice) -
+   * invoice.paidAmountCents`), NUR fürs GiroCode-PDF-Layout, nicht ins XML. Nur von
+   * `loadEInvoiceData` gesetzt (Rechnungen); Geschäftsdokumente (Angebot/AB/Proforma)
+   * zeigen ohnehin nie einen GiroCode. */
+  giroAmountCents?: number | null;
+  /** § 14 Abs. 4 Nr. 9 / § 14b Abs. 1 Satz 5 UStG — Hinweis auf die zweijaehrige
+   * Aufbewahrungspflicht des privaten Leistungsempfaengers bei Bauleistungen am
+   * Grundstueck (Phase 12b, Task 5). Geht als eigener Note/IncludedNote ins XML UND
+   * ins PDF, wenn gesetzt. */
+  consumerRetentionHint?: boolean;
+  /** Phase 12b (COMPLIANCE.md § 11) — unterscheidet die zwei Wege, auf denen ein
+   * CREDIT_NOTE entsteht: Vollstorno (`cancel.ts`) vs. Teilgutschrift/Korrektur
+   * (`credit.ts`). Nur von `loadEInvoiceData` gesetzt, wenn ein Original aufloesbar
+   * ist; steuert ausschliesslich den PDF-Titel ("Stornorechnung"/"Rechnungskorrektur"). */
+  creditNoteKind?: "STORNO" | "KORREKTUR";
+}
+
+/** Phase 5 (§14 Abs. 5 Satz 2 UStG) — Snapshot einer auf einer Schlussrechnung
+ * abgesetzten Abschlagsrechnung, über alle Steuersätze aggregiert (BT-25/BT-26 +
+ * Beträge für PDF-Abzugsblock/BT-22-Aufstellung). */
+export interface EInvoiceDeduction {
+  /** BT-25 — Nummer der Abschlagsrechnung. */
+  number: string;
+  /** BT-26 — Ausstellungsdatum der Abschlagsrechnung. */
+  issueDate: Date;
+  netCents: number;
+  taxCents: number;
+  grossCents: number;
 }
