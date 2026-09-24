@@ -68,22 +68,35 @@ export function renderInvoicePdf(data: EInvoiceData): Promise<Buffer> {
     if (data.dueDate) doc.text(`Fällig am: ${deDate(data.dueDate)}`, { align: "right" });
     if (data.buyer.vatId) doc.text(`USt-IdNr. Empfänger: ${data.buyer.vatId}`, { align: "right" });
 
-    // Positions-Tabelle
+    // Positions-Tabelle — Tabellenkopf als Funktion, wird auf Folgeseiten wiederholt
     let y = 220;
-    doc.fontSize(9).fillColor("#fff");
-    doc.rect(left, y, right - left, 18).fill("#1f2937");
-    doc.fillColor("#fff");
-    doc.text("Pos.", left + 4, y + 5, { width: 28 });
-    doc.text("Beschreibung", left + 36, y + 5, { width: 220 });
-    doc.text("Menge", left + 256, y + 5, { width: 50, align: "right" });
-    doc.text("Einzel", left + 312, y + 5, { width: 70, align: "right" });
-    doc.text("USt", left + 386, y + 5, { width: 35, align: "right" });
-    doc.text("Netto", left + 425, y + 5, { width: 70, align: "right" });
-    y += 22;
+    const drawTableHeader = () => {
+      doc.fontSize(9).fillColor("#fff");
+      doc.rect(left, y, right - left, 18).fill("#1f2937");
+      doc.fillColor("#fff");
+      doc.text("Pos.", left + 4, y + 5, { width: 28 });
+      doc.text("Beschreibung", left + 36, y + 5, { width: 220 });
+      doc.text("Menge", left + 256, y + 5, { width: 50, align: "right" });
+      doc.text("Einzel", left + 312, y + 5, { width: 70, align: "right" });
+      doc.text("USt", left + 386, y + 5, { width: 35, align: "right" });
+      doc.text("Netto", left + 425, y + 5, { width: 70, align: "right" });
+      y += 22;
+      doc.fillColor("#000").fontSize(9);
+    };
+    drawTableHeader();
 
-    doc.fillColor("#000").fontSize(9);
+    // Seitenumbruch: Zeilen, die nicht mehr auf die Seite passen, kommen auf eine
+    // neue Seite mit erneutem Tabellenkopf. Fußzeile beginnt bei y=760.
+    const pageBottom = 745;
     data.lines.forEach((line, i) => {
-      const h = 16;
+      // Dynamische Zeilenhöhe bei mehrzeiliger Beschreibung
+      const descHeight = doc.heightOfString(line.description, { width: 220 });
+      const h = Math.max(descHeight + 4, 20);
+      if (y + h > pageBottom) {
+        doc.addPage();
+        y = 60;
+        drawTableHeader();
+      }
       doc.text(String(i + 1), left + 4, y, { width: 28 });
       doc.text(line.description, left + 36, y, { width: 220 });
       doc.text(`${formatQuantity(line.quantityMilli)} ${line.unit}`, left + 256, y, { width: 50, align: "right" });
@@ -93,7 +106,11 @@ export function renderInvoicePdf(data: EInvoiceData): Promise<Buffer> {
       y += h;
     });
 
-    // Summen
+    // Summen — bei Platzmangel auf neue Seite (Summenblock braucht ~140pt)
+    if (y > 600) {
+      doc.addPage();
+      y = 60;
+    }
     y += 10;
     doc.moveTo(left + 300, y).lineTo(right, y).strokeColor("#ccc").stroke();
     y += 6;
