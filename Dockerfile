@@ -3,6 +3,9 @@
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
+# postinstall führt `prisma generate` aus und braucht dafür Config + Schema
+COPY prisma.config.ts ./
+COPY prisma/schema.prisma ./prisma/
 RUN npm ci
 
 FROM node:22-bookworm-slim AS build
